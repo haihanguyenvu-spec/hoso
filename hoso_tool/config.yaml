@@ -1,0 +1,143 @@
+# Cấu hình tool phân loại & ghép hồ sơ PDF căn hộ.
+# Mọi giá trị ở đây có thể override bằng tham số dòng lệnh của run.py.
+
+# Thư mục gốc chứa các folder căn hộ (mỗi subfolder = 1 căn hộ, tên subfolder = prefix).
+input_root: "/Users/haihanguyenvu/Library/CloudStorage/GoogleDrive-haiha@pmh.com.vn/Other computers/My Computer/NGUYEN VU HAI HA/CAP GIAY/Hỗ trợ Tổ Cấp giấy 2026 - 63 ha/Scan hồ sơ/Cr8-3"
+
+# Tên subfolder ghi file output bên trong mỗi folder căn hộ.
+output_subdir: "output"
+
+# ---- Provider / model (kiến trúc tách-vendor) ----
+provider: "gemini"            # gemini | openai | deepseek
+model: "gemini-2.5-flash"     # đổi sang gemini-2.0-flash / -flash-lite tùy nhu cầu
+# media_resolution: gemini ánh xạ low/medium/high -> token/trang. Trang scan tiếng Việt nên >= medium.
+media_resolution: "medium"    # low | medium | high
+
+# ---- Fallback provider (tự động dùng khi primary bị 503/quá tải) ----
+# Bình luận/xoá section này nếu không muốn fallback.
+fallback:
+  provider: "gemini"                # gemini key thứ 2 (account/project Google khác) — cùng chất lượng
+  model: "gemini-2.5-flash"         # giữ cùng model với primary
+  api_key_env: "GEMINI_API_KEY_2"   # tên biến môi trường chứa API key của account thứ 2
+  max_primary_fails: 2              # sau bao nhiêu lỗi liên tiếp thì chuyển hẳn sang key 2
+  # Key đọc từ env GEMINI_API_KEY_2, hoặc file .gemini_key_2, hoặc nhập trong UI
+
+
+# ---- Đơn giá để tính CHI PHÍ THỰC từ token API trả về (USD / 1 triệu token) ----
+# Sửa cho khớp giá tài khoản bạn (xem Google AI Studio). Mặc định ~ Gemini 2.5 Flash.
+price_input_per_mtok: 0.30
+price_output_per_mtok: 2.50
+
+# ---- QA ----
+confidence_threshold: 0.75    # trang có confidence < ngưỡng -> đưa vào danh sách review
+sample_rate: 0.05             # tỉ lệ folder "ok" được đánh dấu để soi tay (~5%)
+
+# ---- Batch ----
+project_total_folders: 800    # tổng folder dự định chạy -> dùng để DỰ PHÓNG chi phí
+workers: 4                    # số folder xử lý song song
+max_retries: 4                # số lần thử lại khi gọi API lỗi (backoff luỹ thừa)
+
+# ---- Quy tắc nghiệp vụ (nhồi vào prompt; sửa ở đây, không cần đụng code) ----
+rules:
+  - "Bộ HỢP ĐỒNG MUA BÁN gồm: thân hợp đồng VÀ toàn bộ PHỤ LỤC đính kèm (PHỤ LỤC 1-6:
+     danh mục vật liệu, công việc quản lý vận hành, MẪU biên bản/biểu mẫu trống, các bản vẽ
+     trong phụ lục, nội quy, phần sở hữu chung, giấy cam đoan kèm hợp đồng). TẤT CẢ các trang
+     này → category = hop_dong (dùng subtype phu_luc_hd cho phần phụ lục)."
+  - "Biên bản bàn giao/kiểm tra chỉ tính bản ĐÃ ĐIỀN thông tin thực tế (có tên người, số căn
+     hộ, chữ ký). KHÔNG xếp 'MẪU' biểu mẫu TRỐNG nằm trong phụ lục hợp đồng vào đây — cái đó là hop_dong."
+  - "Bản vẽ sơ đồ ĐỘC LẬP (nộp kèm hồ sơ thuế/đăng ký, KHÔNG nằm trong phụ lục hợp đồng) →
+     thue. Bản vẽ nằm trong PHỤ LỤC của hợp đồng → hop_dong."
+  - "PHÂN BIỆT 2 loại giấy ủy quyền:
+     (a) Giấy ủy quyền của BÊN BÁN / CHỦ ĐẦU TƯ (vd Phú Mỹ Hưng: Tổng Giám đốc thay mặt Công ty
+     ủy quyền cho Phó TGĐ / Giám đốc phòng kinh doanh ký các hợp đồng mua bán, chuyển nhượng) →
+     thuộc bộ HỢP ĐỒNG: category = hop_dong, subtype = uy_quyen_ben_ban. KHÔNG xếp vào nhóm Giấy ủy quyền.
+     (b) Giấy ủy quyền của BÊN MUA / CÁ NHÂN (thường có công chứng, ủy quyền cho người khác làm thủ
+     tục đăng ký/biến động, nhận giấy tờ...) → category = giay_uy_quyen."
+
+# ---- Định nghĩa 6 loại output ----
+# - key: id nội bộ
+# - name: tên hiển thị, dùng đặt tên file "<prefix>_<name>.pdf"
+# - required: true => folder thiếu loại này sẽ bị flag (không tạo file rỗng)
+# - subtypes: liệt kê theo ĐÚNG thứ tự mong muốn khi ghép (văn bản chính trước, đính kèm sau)
+#     Mỗi subtype có keywords (tiêu đề/cụm từ tiếng Việt) để model bám vào khi phân loại.
+categories:
+  - key: don_dang_ky_bien_dong
+    name: "Đơn đăng ký biến động"
+    required: true
+    subtypes:
+      - id: don_dkbd
+        desc: "Đơn đăng ký biến động đất đai, tài sản gắn liền với đất"
+        keywords: ["ĐƠN ĐĂNG KÝ BIẾN ĐỘNG", "đăng ký biến động đất đai", "Mẫu số 09/ĐK"]
+      - id: gcn_ket_hon
+        desc: "Giấy chứng nhận kết hôn"
+        keywords: ["GIẤY CHỨNG NHẬN KẾT HÔN", "kết hôn"]
+      - id: xac_nhan_doc_than
+        desc: "Giấy xác nhận tình trạng hôn nhân / độc thân"
+        keywords: ["XÁC NHẬN TÌNH TRẠNG HÔN NHÂN", "độc thân", "tình trạng hôn nhân"]
+      - id: vb_thoa_thuan_tai_san
+        desc: "Văn bản thỏa thuận tài sản riêng vợ chồng"
+        keywords: ["THỎA THUẬN", "tài sản riêng", "tài sản chung vợ chồng"]
+
+  - key: hop_dong
+    name: "Hợp đồng"
+    required: true
+    subtypes:
+      - id: hop_dong_mua_ban
+        desc: "Hợp đồng mua bán nhà ở / căn hộ"
+        keywords: ["HỢP ĐỒNG MUA BÁN", "căn hộ", "nhà ở"]
+      - id: vb_chuyen_nhuong_hd
+        desc: "Văn bản chuyển nhượng hợp đồng mua bán"
+        keywords: ["VĂN BẢN CHUYỂN NHƯỢNG HỢP ĐỒNG", "chuyển nhượng hợp đồng mua bán"]
+      - id: uy_quyen_ben_ban
+        desc: "Giấy ủy quyền của BÊN BÁN/chủ đầu tư (Tổng GĐ thay mặt Công ty ủy quyền cho người của công ty ký hợp đồng mua bán) — đi kèm hợp đồng"
+        keywords: ["GIẤY ỦY QUYỀN", "thay mặt Công ty", "Tổng Giám đốc", "Phó Tổng Giám đốc", "Người được ủy quyền", "ký kết"]
+      - id: phu_luc_hd
+        desc: "Phụ lục đính kèm hợp đồng (danh mục vật liệu, quản lý vận hành, MẪU biểu mẫu trống, bản vẽ trong phụ lục, nội quy, sở hữu chung, giấy cam đoan kèm HĐ)"
+        keywords: ["PHỤ LỤC", "DANH MỤC VẬT LIỆU", "NỘI QUY", "MẪU BIÊN BẢN", "Ký tắt"]
+
+  - key: bien_ban_ban_giao
+    name: "Biên bản bàn giao"
+    required: true
+    subtypes:
+      - id: bb_ban_giao
+        desc: "Biên bản bàn giao nhà đất / căn hộ"
+        keywords: ["BIÊN BẢN BÀN GIAO", "bàn giao căn hộ", "bàn giao nhà"]
+      - id: bb_kiem_tra_chap_nhan
+        desc: "Biên bản kiểm tra và chấp nhận căn hộ ĐÃ ĐIỀN (có tên, số căn hộ, chữ ký) — KHÔNG phải MẪU trống trong phụ lục hợp đồng"
+        keywords: ["BIÊN BẢN KIỂM TRA", "chấp nhận căn hộ", "nghiệm thu căn hộ"]
+
+  - key: thue
+    name: "Thuế"
+    required: true
+    subtypes:
+      - id: to_khai_thue
+        desc: "Tờ khai thuế (thu nhập cá nhân, lệ phí trước bạ...)"
+        keywords: ["TỜ KHAI THUẾ", "tờ khai lệ phí trước bạ", "thu nhập cá nhân", "Mẫu số 03/BĐS"]
+      - id: chung_tu_thue_tncn
+        desc: "Chứng từ / biên lai nộp thuế thu nhập cá nhân"
+        keywords: ["BIÊN LAI", "chứng từ nộp", "nộp thuế", "giấy nộp tiền"]
+      - id: ban_ve_so_do
+        desc: "Bản vẽ sơ đồ căn hộ/thửa đất ĐỘC LẬP nộp kèm hồ sơ thuế (KHÔNG nằm trong phụ lục hợp đồng)"
+        keywords: ["BẢN VẼ", "SƠ ĐỒ", "mặt bằng căn hộ"]
+
+  - key: giay_uy_quyen
+    name: "Giấy ủy quyền"
+    required: true
+    subtypes:
+      - id: giay_uy_quyen
+        desc: "Giấy ủy quyền của BÊN MUA/cá nhân (thường công chứng, ủy quyền làm thủ tục đăng ký/biến động) — KHÔNG phải ủy quyền của chủ đầu tư để ký hợp đồng"
+        keywords: ["GIẤY ỦY QUYỀN", "HỢP ĐỒNG ỦY QUYỀN", "ủy quyền", "công chứng"]
+      - id: giay_gioi_thieu
+        desc: "Giấy giới thiệu"
+        keywords: ["GIẤY GIỚI THIỆU", "giới thiệu"]
+
+  - key: thong_tin_khach_hang
+    name: "Thông tin Khách hàng"
+    required: true
+    subtypes:
+      - id: cccd
+        desc: "Căn cước công dân / CMND"
+        keywords: ["CĂN CƯỚC CÔNG DÂN", "CƯỚC CÔNG DÂN", "CHỨNG MINH NHÂN DÂN", "Số/No"]
+      - id: ho_chieu
+        desc: "Hộ chiếu"
+        keywords: ["HỘ CHIẾU", "PASSPORT"]

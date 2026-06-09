@@ -1,0 +1,8 @@
+# Cấu hình Streamlit cho tool hồ sơ PDF — chạy LOCAL, không deploy public.
+[client]
+# "minimal" = ẩn nút Deploy và thu gọn thanh công cụ (app chạy nội bộ).
+toolbarMode = "minimal"
+
+[browser]
+# Không gửi thống kê sử dụng đi đâu cả.
+gatherUsageStats = false

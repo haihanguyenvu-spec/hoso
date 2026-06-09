@@ -1,0 +1,24 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# API keys — KHÔNG commit
+hoso_tool/.gemini_key
+hoso_tool/.gemini_key_2
+hoso_tool/key.py
+
+# Streamlit
+.streamlit/secrets.toml
+streamlit.log
+
+# Output / dữ liệu cục bộ
+hoso_tool/output/
+*/_review/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# macOS
+.DS_Store
