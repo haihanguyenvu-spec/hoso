@@ -22,3 +22,7 @@ hoso_tool/output/
 
 # macOS
 .DS_Store
+
+# Đóng gói Windows (bundle + installer build ra)
+packaging/build/
+packaging/dist/

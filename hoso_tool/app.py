@@ -23,6 +23,26 @@ CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
 NONE_LABEL = "(Không thuộc)"
 
 
+# ---------- Lưu trữ key (ghi được kể cả khi app cài trong Program Files) ----------
+def user_data_dir() -> str:
+    """Thư mục cấu hình của người dùng, luôn ghi được.
+
+    Windows: %APPDATA%\\HoSoPDF   ·   macOS/Linux: ~/.config/hoso_tool
+    """
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        d = os.path.join(base, "HoSoPDF")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+        d = os.path.join(base, "hoso_tool")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def key_path(name: str) -> str:
+    return os.path.join(user_data_dir(), name)
+
+
 # ---------- Helpers ----------
 @st.cache_data
 def load_config() -> dict:
@@ -42,8 +62,12 @@ def get_api_key() -> str | None:
     key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if key:
         return key.strip()
-    for cand in ("key.py", "../key.py", ".gemini_key", "../.gemini_key"):
-        p = os.path.join(os.path.dirname(__file__), cand)
+    here = os.path.dirname(__file__)
+    # Ưu tiên key đã lưu ở thư mục user (%APPDATA%), sau đó các vị trí cũ cạnh code.
+    cands = [key_path(".gemini_key"),
+             os.path.join(here, "key.py"), os.path.join(here, "..", "key.py"),
+             os.path.join(here, ".gemini_key"), os.path.join(here, "..", ".gemini_key")]
+    for p in cands:
         if os.path.exists(p):
             return open(p, encoding="utf-8").read().strip()
     return None
@@ -53,8 +77,10 @@ def get_api_key_2() -> str | None:
     key = os.environ.get("GEMINI_API_KEY_2")
     if key:
         return key.strip()
-    for cand in (".gemini_key_2", "../.gemini_key_2"):
-        p = os.path.join(os.path.dirname(__file__), cand)
+    here = os.path.dirname(__file__)
+    cands = [key_path(".gemini_key_2"),
+             os.path.join(here, ".gemini_key_2"), os.path.join(here, "..", ".gemini_key_2")]
+    for p in cands:
         if os.path.exists(p):
             return open(p, encoding="utf-8").read().strip()
     return None
@@ -140,10 +166,10 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Key 1 lỗi: {e}")
     if b2.button("💾 Lưu", disabled=not typed, use_container_width=True,
-                 help="Lưu vào .gemini_key để lần sau tự nhận"):
-        with open(os.path.join(os.path.dirname(__file__), ".gemini_key"), "w", encoding="utf-8") as f:
+                 help="Lưu key vào thư mục cá nhân để lần sau tự nhận"):
+        with open(key_path(".gemini_key"), "w", encoding="utf-8") as f:
             f.write(typed)
-        st.toast("Đã lưu .gemini_key")
+        st.toast("Đã lưu key 1")
     if api_key:
         os.environ["GEMINI_API_KEY"] = api_key
 
@@ -169,11 +195,10 @@ if cfg.get("fallback", {}).get("provider") == "gemini":
             except Exception as e:
                 st.error(f"Key 2 lỗi: {e}")
         if c2.button("💾 Lưu", disabled=not typed2, use_container_width=True,
-                     key="save_key2", help="Lưu vào .gemini_key_2"):
-            with open(os.path.join(os.path.dirname(__file__), ".gemini_key_2"),
-                      "w", encoding="utf-8") as fh:
+                     key="save_key2", help="Lưu key 2 vào thư mục cá nhân"):
+            with open(key_path(".gemini_key_2"), "w", encoding="utf-8") as fh:
                 fh.write(typed2)
-            st.toast("Đã lưu .gemini_key_2")
+            st.toast("Đã lưu key 2")
         if api_key_2:
             os.environ["GEMINI_API_KEY_2"] = api_key_2
 
