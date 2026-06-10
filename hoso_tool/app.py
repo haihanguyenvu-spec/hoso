@@ -139,6 +139,7 @@ def folder_status(folder: str, cfg: dict) -> str:
     return "⬜ chưa chạy"
 
 
+@st.cache_data(ttl=5, show_spinner=False)
 def discover(input_root: str, cfg: dict) -> list[str]:
     out_subdir = cfg.get("output_subdir", "output")
     res = []
@@ -153,23 +154,14 @@ def discover(input_root: str, cfg: dict) -> list[str]:
 
 
 # ---------- UI ----------
-st.set_page_config(page_title="Phân loại hồ sơ PDF căn hộ", page_icon="📄", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Phân loại & Ghép hồ sơ PDF", page_icon="📄", layout="wide", initial_sidebar_state="expanded")
 # Ẩn các nút/chrome mặc định của Streamlit (menu ⋮, Deploy, footer "Made with Streamlit")
 # -> giao diện chỉ còn các nút của tool.
 st.markdown("""
 <style>
 #MainMenu {visibility: hidden;}
-[data-testid="stToolbar"] {visibility: hidden; height: 0;}
-[data-testid="stDecoration"] {display: none;}
 footer {visibility: hidden;}
-/* Bắt buộc hiển thị nút mở/đóng thanh bên */
-[data-testid="collapsedControl"], [data-testid="stSidebarCollapseButton"] {
-    visibility: visible !important;
-    display: block !important;
-    color: black !important;
-    background-color: #f0f2f6 !important;
-    border-radius: 4px;
-}
+[data-testid="stHeaderActionElements"] {display: none;}
 </style>
 """, unsafe_allow_html=True)
 cfg = load_config()
@@ -178,7 +170,8 @@ name_by_key, key_by_name = label_maps(cfg)
 if "api_keys" not in st.session_state:
     st.session_state.api_keys = load_keys() or [""]
 
-st.sidebar.title("📂 Hồ sơ PDF căn hộ")
+st.sidebar.title("📂 Phân loại & Ghép hồ sơ PDF")
+st.sidebar.caption("© Nguyễn Vũ Hải Hà @ 2026")
 st.sidebar.caption(f"Model: **{cfg['provider']} / {cfg['model']}**")
 st.sidebar.markdown("---")
 
@@ -227,17 +220,16 @@ with st.sidebar:
         st.rerun()
 
     st.sidebar.markdown("---")
-    st.sidebar.caption("© Nguyễn Vũ Hải Hà @ 2026")
 
 # --- Ô nhập thư mục gốc (trước tabs, dùng chung cho cả 3 tab) ---
-st.markdown("### 📁 Thư mục gốc chứa các folder căn hộ")
+st.markdown("### 📁 Thư mục gốc chứa các folder hồ sơ")
 col_path, col_hint = st.columns([4, 1])
 with col_path:
     input_root = st.text_input(
         "Đường dẫn thư mục gốc",
         value=cfg["input_root"],
         placeholder="/path/to/Cr8-3",
-        help="Mỗi subfolder bên trong = 1 căn hộ. Nhập đường dẫn rồi nhấn Enter.",
+        help="Mỗi subfolder bên trong = 1 bộ hồ sơ. Nhập đường dẫn rồi nhấn Enter.",
         label_visibility="collapsed",
     )
 with col_hint:
@@ -263,7 +255,7 @@ with tab1:
     st.subheader("Phân loại trang bằng vision model")
 
     if not folders:
-        st.info("Không thấy folder căn hộ nào trong thư mục gốc. Hãy chắc chắn mỗi subfolder chứa ít nhất 1 file PDF.")
+        st.info("Không thấy folder hồ sơ nào trong thư mục gốc. Hãy chắc chắn mỗi subfolder chứa ít nhất 1 file PDF.")
     else:
         rows = [{"Folder": os.path.basename(f), "Số PDF": len(pipeline.list_pdfs(f, cfg["output_subdir"])),
                  "Trạng thái": folder_status(f, cfg)} for f in folders]
@@ -289,11 +281,13 @@ with tab1:
         api_keys_active = [k for k in st.session_state.api_keys if k.strip()]
         btn_disabled = not (pick and api_keys_active)
         if st.button("▶ Phân loại & Tạo 6 file PDF", type="primary", disabled=btn_disabled):
-            cfg["api_keys"] = api_keys_active
-            classifier = make_classifier(cfg)
-            classify = make_retrying_classify(classifier, int(cfg.get("max_retries", 4)))
-            sel = [f for f in folders if os.path.basename(f) in pick]
-            n_total = len(sel)
+            st.toast("⏳ Đang khởi tạo bộ xử lý...", icon="🚀")
+            with st.spinner("Đang chuẩn bị mô hình..."):
+                cfg["api_keys"] = api_keys_active
+                classifier = make_classifier(cfg)
+                classify = make_retrying_classify(classifier, int(cfg.get("max_retries", 4)))
+                sel = [f for f in folders if os.path.basename(f) in pick]
+                n_total = len(sel)
             bar = st.progress(0.0)
             status_box = st.empty()
             n_err = 0
@@ -313,20 +307,61 @@ with tab1:
                 status_box.info(f"⏳ **Đang xử lý folder {i}/{n_total}: {fname}** "
                                 f"— đang gọi vision model, vui lòng chờ...")
                 try:
-                    # Bước 1: Phân loại (gọi vision model)
-                    entries = pipeline.classify_folder(f, cfg, classify)
-                    # Bước 2: Ghép 6 file PDF ngay lập tức
-                    status_box.info(f"⏳ **Đang xử lý folder {i}/{n_total}: {fname}** "
-                                    f"— đang ghép 6 file PDF...")
-                    res = pipeline.assemble_from_index(f, cfg, entries)
+                    from pipeline import process_folder
+                    res = process_folder(f, cfg, classify, dry_run=False)
+                    
                     # Đánh dấu đã hoàn thành
-                    open(done_marker, "w").close()
+                    if res.status in ("ok", "flagged"):
+                        open(done_marker, "w").close()
+                        
                     # Hiển thị kết quả
                     if res.reasons:
                         st.warning(f"⚠️ {fname}: {len(res.outputs)} file · {res.classified_pages}/{res.total_pages} trang · "
                                    + "; ".join(res.reasons))
                     else:
                         st.success(f"✅ {fname}: {len(res.outputs)} file · {res.classified_pages}/{res.total_pages} trang")
+                        
+                    # Ghi nhận vào báo cáo tổng
+                    from run import write_summary, est_cost
+                    review_dir = os.path.join(input_root, "_review")
+                    os.makedirs(review_dir, exist_ok=True)
+                    summ_path = os.path.join(review_dir, "summary.csv")
+                    
+                    # Đọc summary cũ (nếu có)
+                    import csv
+                    rows = []
+                    if os.path.exists(summ_path):
+                        with open(summ_path, "r", encoding="utf-8-sig") as csv_f:
+                            reader = csv.DictReader(csv_f)
+                            rows = list(reader)
+                    
+                    # Xóa dòng cũ của folder này (nếu đã từng chạy)
+                    rows = [row for row in rows if row.get("folder") != res.prefix]
+                    
+                    # Thêm dòng mới
+                    new_row = {
+                        "folder": res.prefix,
+                        "status": res.status,
+                        "sample_check": "",
+                        "total_pages": str(res.total_pages),
+                        "classified_pages": str(res.classified_pages),
+                        "low_conf": str(res.low_conf_pages),
+                        "missing": ", ".join(res.categories_missing),
+                        "est_cost_usd": f"{est_cost(res.total_pages, cfg):.4f}",
+                        "real_tokens": str(res.total_tokens),
+                        "real_cost_usd": f"{res.real_cost:.4f}",
+                        "reasons": " | ".join(res.reasons) or res.error
+                    }
+                    rows.append(new_row)
+                    rows.sort(key=lambda x: x.get("folder", ""))
+                    
+                    # Ghi lại file
+                    if rows:
+                        with open(summ_path, "w", newline="", encoding="utf-8-sig") as csv_f:
+                            w = csv.DictWriter(csv_f, fieldnames=list(rows[0].keys()))
+                            w.writeheader()
+                            w.writerows(rows)
+                            
                 except Exception as e:
                     n_err += 1
                     msg = str(e)
