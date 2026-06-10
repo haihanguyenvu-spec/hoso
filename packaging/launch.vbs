@@ -20,9 +20,27 @@ env("PATH") = popplerBin & ";" & env("PATH")
 ' Streamlit đọc .streamlit\config.toml theo thư mục làm việc -> đặt CWD = app\.
 sh.CurrentDirectory = appDir
 
+Dim logDir, logFile, testFile
+logDir = sh.ExpandEnvironmentStrings("%APPDATA%\HoSoPDF")
+logFile = logDir & "\app_log.txt"
+
 url = "http://localhost:8501"
-cmd = "cmd.exe /c """"" & py & """ -m streamlit run """ & appPy & """ " & _
-      "--server.headless=true --server.port=8501 --browser.gatherUsageStats=false > """ & base & "\app_log.txt"" 2>&1"""
+
+On Error Resume Next
+If Not fso.FolderExists(logDir) Then
+    fso.CreateFolder(logDir)
+End If
+
+Set testFile = fso.CreateTextFile(logFile, True)
+If Err.Number = 0 Then
+    testFile.Close()
+    cmd = "cmd.exe /c """"" & py & """ -m streamlit run """ & appPy & """ --server.headless=true --server.port=8501 --browser.gatherUsageStats=false > """ & logFile & """ 2>&1"""
+Else
+    Err.Clear()
+    cmd = """" & py & """ -m streamlit run """ & appPy & """" & _
+          " --server.headless=true --server.port=8501 --browser.gatherUsageStats=false"
+End If
+On Error GoTo 0
 
 ' 0 = ẩn cửa sổ, False = không chờ (server chạy nền).
 sh.Run cmd, 0, False
