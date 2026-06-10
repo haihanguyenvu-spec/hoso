@@ -151,8 +151,19 @@ def main():
         return
 
     try:
-        from app import load_keys
-        cfg["api_keys"] = load_keys()
+        import json
+        if os.name == "nt":
+            base = os.environ.get("APPDATA") or os.path.expanduser("~")
+            d = os.path.join(base, "HoSoPDF")
+        else:
+            base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+            d = os.path.join(base, "hoso_tool")
+        p = os.path.join(d, "keys.json")
+        if os.path.exists(p):
+            with open(p, encoding="utf-8") as f:
+                keys = json.load(f)
+                if isinstance(keys, list):
+                    cfg["api_keys"] = [k.strip() for k in keys if k.strip()]
     except Exception:
         pass
     classifier = make_classifier(cfg)

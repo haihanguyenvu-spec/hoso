@@ -285,6 +285,7 @@ with tab1:
                 help="Nếu bật: cho phép xử lý lại các folder đã có dấu ✅. "
                      "Nếu tắt (mặc định): các folder đã ghép sẽ bị bỏ qua dù có chọn.")
 
+        out_subdir = cfg.get("output_subdir", "output")
         api_keys_active = [k for k in st.session_state.api_keys if k.strip()]
         btn_disabled = not (pick and api_keys_active)
         if st.button("▶ Phân loại & Tạo 6 file PDF", type="primary", disabled=btn_disabled):

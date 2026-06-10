@@ -461,7 +461,7 @@ def make_classifier(config: dict) -> Classifier:
         fallback: Classifier = GeminiClassifier(
             model=fallback_cfg.get("model", config["model"]),
             categories=config["categories"],
-            api_key=fallback_key,
+            api_keys=[fallback_key],
             media_resolution=fallback_cfg.get("media_resolution", config.get("media_resolution", "medium")),
             rules=config.get("rules"),
         )
