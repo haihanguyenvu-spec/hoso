@@ -119,7 +119,7 @@ def discover(input_root: str, cfg: dict) -> list[str]:
 
 
 # ---------- UI ----------
-st.set_page_config(page_title="Phân loại hồ sơ PDF căn hộ", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Phân loại hồ sơ PDF căn hộ", page_icon="📄", layout="wide", initial_sidebar_state="expanded")
 # Ẩn các nút/chrome mặc định của Streamlit (menu ⋮, Deploy, footer "Made with Streamlit")
 # -> giao diện chỉ còn các nút của tool.
 st.markdown("""
@@ -145,7 +145,8 @@ st.sidebar.title("📂 Hồ sơ PDF căn hộ")
 _fb_cfg = cfg.get("fallback", {})
 _fb_label = "  |  Fallback: key-2" if _fb_cfg.get("provider") == "gemini" else ""
 st.sidebar.caption(f"Model: **{cfg['provider']} / {cfg['model']}**{_fb_label}")
-
+st.sidebar.markdown("---")
+st.sidebar.caption("© Nguyễn Vũ Hải Hà @ 2026")
 # ----- API key 1 (sidebar) -----
 with st.sidebar:
     st.markdown("**🔑 API key 1 (chính)**")

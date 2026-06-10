@@ -21,8 +21,8 @@ env("PATH") = popplerBin & ";" & env("PATH")
 sh.CurrentDirectory = appDir
 
 url = "http://localhost:8501"
-cmd = """" & py & """ -m streamlit run """ & appPy & """" & _
-      " --server.headless=true --server.port=8501 --browser.gatherUsageStats=false"
+cmd = "cmd.exe /c """"" & py & """ -m streamlit run """ & appPy & """ " & _
+      "--server.headless=true --server.port=8501 --browser.gatherUsageStats=false > """ & base & "\app_log.txt"" 2>&1"""
 
 ' 0 = ẩn cửa sổ, False = không chờ (server chạy nền).
 sh.Run cmd, 0, False
