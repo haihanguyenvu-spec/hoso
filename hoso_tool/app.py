@@ -86,12 +86,46 @@ def get_api_key_2() -> str | None:
     return None
 
 
+def load_keys() -> list[str]:
+    import json
+    p = key_path("keys.json")
+    if os.path.exists(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                keys = json.load(f)
+                if isinstance(keys, list):
+                    return [k.strip() for k in keys if k.strip()]
+        except Exception:
+            pass
+    # Fallback legacy
+    legacy = []
+    k1 = get_api_key()
+    if k1:
+        legacy.append(k1)
+    k2 = get_api_key_2()
+    if k2:
+        legacy.append(k2)
+    return legacy
+
+
+def save_keys(keys: list[str]):
+    import json
+    p = key_path("keys.json")
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump([k.strip() for k in keys if k.strip()], f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
 @st.cache_data(show_spinner=False)
 def render_page(pdf_path: str, page: int, dpi: int = 110) -> bytes:
-    with tempfile.TemporaryDirectory() as d:
+    from assemble import safe_input_path, get_safe_temp_dir
+    with tempfile.TemporaryDirectory(dir=get_safe_temp_dir()) as d:
         root = os.path.join(d, "p")
-        subprocess.run(["pdftoppm", "-png", "-r", str(dpi), "-f", str(page), "-l", str(page),
-                        pdf_path, root], check=True, capture_output=True)
+        with safe_input_path(pdf_path) as safe_path:
+            subprocess.run(["pdftoppm", "-png", "-r", str(dpi), "-f", str(page), "-l", str(page),
+                            safe_path, root], check=True, capture_output=True)
         png = next(f for f in os.listdir(d) if f.endswith(".png"))
         return open(os.path.join(d, png), "rb").read()
 
@@ -141,67 +175,59 @@ footer {visibility: hidden;}
 cfg = load_config()
 name_by_key, key_by_name = label_maps(cfg)
 
-st.sidebar.title("📂 Hồ sơ PDF căn hộ")
-_fb_cfg = cfg.get("fallback", {})
-_fb_label = "  |  Fallback: key-2" if _fb_cfg.get("provider") == "gemini" else ""
-st.sidebar.caption(f"Model: **{cfg['provider']} / {cfg['model']}**{_fb_label}")
-st.sidebar.markdown("---")
-st.sidebar.caption("© Nguyễn Vũ Hải Hà @ 2026")
-# ----- API key 1 (sidebar) -----
-with st.sidebar:
-    st.markdown("**🔑 API key 1 (chính)**")
-    found = get_api_key()
-    if found:
-        st.success("Key 1: sẵn sàng ✓")
-    else:
-        st.warning("Chưa có key 1 — cần nhập để phân loại được.")
-    typed = st.text_input("GEMINI_API_KEY", type="password", key="api_key_field",
-                          placeholder="dán key tại đây").strip()
-    api_key = typed or found
-    b1, b2 = st.columns(2)
-    if b1.button("Kiểm tra", disabled=not api_key, use_container_width=True):
-        try:
-            from google import genai
-            next(iter(genai.Client(api_key=api_key).models.list()), None)
-            st.success("Key 1 hợp lệ ✓")
-        except Exception as e:
-            st.error(f"Key 1 lỗi: {e}")
-    if b2.button("💾 Lưu", disabled=not typed, use_container_width=True,
-                 help="Lưu key vào thư mục cá nhân để lần sau tự nhận"):
-        with open(key_path(".gemini_key"), "w", encoding="utf-8") as f:
-            f.write(typed)
-        st.toast("Đã lưu key 1")
-    if api_key:
-        os.environ["GEMINI_API_KEY"] = api_key
+if "api_keys" not in st.session_state:
+    st.session_state.api_keys = load_keys() or [""]
 
-# ----- API key 2 (sidebar, chỉ hiện nếu config dùng gemini fallback) -----
-if cfg.get("fallback", {}).get("provider") == "gemini":
-    with st.sidebar:
-        st.markdown("**🔑 API key 2 (fallback)**")
-        found2 = get_api_key_2()
-        if found2:
-            st.success("Key 2: sẵn sàng ✓")
-        else:
-            st.warning("Chưa có key 2 — fallback không hoạt động khi key 1 bị 503.")
-        typed2 = st.text_input("GEMINI_API_KEY_2", type="password", key="api_key_2_field",
-                               placeholder="dán key 2 tại đây").strip()
-        api_key_2 = typed2 or found2
-        c1, c2 = st.columns(2)
-        if c1.button("Kiểm tra", disabled=not api_key_2,
-                     use_container_width=True, key="chk_key2"):
-            try:
-                from google import genai as _genai
-                next(iter(_genai.Client(api_key=api_key_2).models.list()), None)
-                st.success("Key 2 hợp lệ ✓")
-            except Exception as e:
-                st.error(f"Key 2 lỗi: {e}")
-        if c2.button("💾 Lưu", disabled=not typed2, use_container_width=True,
-                     key="save_key2", help="Lưu key 2 vào thư mục cá nhân"):
-            with open(key_path(".gemini_key_2"), "w", encoding="utf-8") as fh:
-                fh.write(typed2)
-            st.toast("Đã lưu key 2")
-        if api_key_2:
-            os.environ["GEMINI_API_KEY_2"] = api_key_2
+st.sidebar.title("📂 Hồ sơ PDF căn hộ")
+st.sidebar.caption(f"Model: **{cfg['provider']} / {cfg['model']}**")
+st.sidebar.markdown("---")
+
+with st.sidebar:
+    st.markdown("**🔑 Danh sách API Keys (Gemini)**")
+    
+    new_keys_len = len(st.session_state.api_keys)
+    to_delete = None
+    
+    for idx in range(new_keys_len):
+        col_in, col_btn = st.columns([5, 1])
+        with col_in:
+            val = st.text_input(
+                f"Key #{idx+1}",
+                value=st.session_state.api_keys[idx],
+                type="password",
+                key=f"key_input_val_{idx}"
+            ).strip()
+            # Cập nhật giá trị vào session state ngay lập tức
+            st.session_state.api_keys[idx] = val
+        with col_btn:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            if st.button("❌", key=f"del_key_{idx}", help=f"Xóa Key #{idx+1}"):
+                to_delete = idx
+
+    if to_delete is not None:
+        st.session_state.api_keys.pop(to_delete)
+        # Xóa widget states để tránh lưu dữ liệu rác
+        for i in range(len(st.session_state.api_keys) + 1):
+            if f"key_input_val_{i}" in st.session_state:
+                del st.session_state[f"key_input_val_{i}"]
+        if not st.session_state.api_keys:
+            st.session_state.api_keys = [""]
+        save_keys([k for k in st.session_state.api_keys if k])
+        st.rerun()
+
+    if st.button("➕ Thêm API Key", use_container_width=True):
+        st.session_state.api_keys.append("")
+        st.rerun()
+
+    if st.button("💾 Lưu tất cả key", use_container_width=True):
+        final_keys = [k for k in st.session_state.api_keys if k]
+        st.session_state.api_keys = final_keys if final_keys else [""]
+        save_keys(final_keys)
+        st.toast("Đã lưu danh sách API Keys!")
+        st.rerun()
+
+    st.sidebar.markdown("---")
+    st.sidebar.caption("© Nguyễn Vũ Hải Hà @ 2026")
 
 # --- Ô nhập thư mục gốc (trước tabs, dùng chung cho cả 3 tab) ---
 st.markdown("### 📁 Thư mục gốc chứa các folder căn hộ")
@@ -259,8 +285,10 @@ with tab1:
                 help="Nếu bật: cho phép xử lý lại các folder đã có dấu ✅. "
                      "Nếu tắt (mặc định): các folder đã ghép sẽ bị bỏ qua dù có chọn.")
 
-        out_subdir = cfg.get("output_subdir", "output")
-        if st.button("▶ Phân loại & Tạo 6 file PDF", type="primary", disabled=not (pick and api_key)):
+        api_keys_active = [k for k in st.session_state.api_keys if k.strip()]
+        btn_disabled = not (pick and api_keys_active)
+        if st.button("▶ Phân loại & Tạo 6 file PDF", type="primary", disabled=btn_disabled):
+            cfg["api_keys"] = api_keys_active
             classifier = make_classifier(cfg)
             classify = make_retrying_classify(classifier, int(cfg.get("max_retries", 4)))
             sel = [f for f in folders if os.path.basename(f) in pick]

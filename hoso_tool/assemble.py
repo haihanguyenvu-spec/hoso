@@ -11,18 +11,52 @@ import subprocess
 import tempfile
 
 
+import contextlib
+
+def get_safe_temp_dir() -> str:
+    t = tempfile.gettempdir()
+    if os.name == "nt" and any(ord(c) > 127 for c in t):
+        for path in ["C:\\Temp", os.path.join(os.getcwd(), ".hoso_temp")]:
+            try:
+                os.makedirs(path, exist_ok=True)
+                return path
+            except Exception:
+                pass
+    return t
+
+
+@contextlib.contextmanager
+def safe_input_path(path: str):
+    """Nếu đường dẫn chứa ký tự Unicode và chạy trên Windows, copy file sang một đường dẫn ASCII tạm thời."""
+    if os.name == "nt" and any(ord(c) > 127 for c in path):
+        fd, temp_path = tempfile.mkstemp(suffix=".pdf", dir=get_safe_temp_dir())
+        os.close(fd)
+        try:
+            shutil.copyfile(path, temp_path)
+            yield temp_path
+        finally:
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+    else:
+        yield path
+
+
 def page_count(pdf_path: str) -> int:
-    out = subprocess.run(["pdfinfo", pdf_path], capture_output=True, encoding="utf-8", errors="ignore", check=True)
-    m = re.search(r"^Pages:\s+(\d+)", out.stdout, re.MULTILINE)
-    if not m:
-        raise RuntimeError(f"Không đọc được số trang: {pdf_path}")
-    return int(m.group(1))
+    with safe_input_path(pdf_path) as safe_path:
+        out = subprocess.run(["pdfinfo", safe_path], capture_output=True, encoding="utf-8", errors="ignore", check=True)
+        m = re.search(r"^Pages:\s+(\d+)", out.stdout, re.MULTILINE)
+        if not m:
+            raise RuntimeError(f"Không đọc được số trang: {pdf_path}")
+        return int(m.group(1))
 
 
 def has_text_layer(pdf_path: str, sample_chars: int = 20) -> bool:
     """True nếu PDF có lớp text (không phải scan thuần ảnh)."""
-    out = subprocess.run(["pdftotext", pdf_path, "-"], capture_output=True, encoding="utf-8", errors="ignore")
-    return len(out.stdout.strip()) >= sample_chars
+    with safe_input_path(pdf_path) as safe_path:
+        out = subprocess.run(["pdftotext", safe_path, "-"], capture_output=True, encoding="utf-8", errors="ignore")
+        return len(out.stdout.strip()) >= sample_chars
 
 
 class PdfAssembler:
@@ -30,7 +64,7 @@ class PdfAssembler:
 
     def __init__(self, workdir: str | None = None):
         self._owns_workdir = workdir is None
-        self.workdir = workdir or tempfile.mkdtemp(prefix="hoso_asm_")
+        self.workdir = workdir or tempfile.mkdtemp(prefix="hoso_asm_", dir=get_safe_temp_dir())
         self._separated: dict[str, dict[int, str]] = {}  # src_path -> {page_no: single_pdf}
 
     def _separate(self, src_pdf: str) -> dict[int, str]:
@@ -40,8 +74,9 @@ class PdfAssembler:
         outdir = os.path.join(self.workdir, key)
         os.makedirs(outdir, exist_ok=True)
         pattern = os.path.join(outdir, "p-%d.pdf")
-        subprocess.run(["pdfseparate", src_pdf, pattern], check=True,
-                       capture_output=True, encoding="utf-8", errors="ignore")
+        with safe_input_path(src_pdf) as safe_src:
+            subprocess.run(["pdfseparate", safe_src, pattern], check=True,
+                           capture_output=True, encoding="utf-8", errors="ignore")
         pages: dict[int, str] = {}
         for fn in os.listdir(outdir):
             m = re.match(r"p-(\d+)\.pdf$", fn)
@@ -66,8 +101,21 @@ class PdfAssembler:
         if len(single_pdfs) == 1:
             shutil.copyfile(single_pdfs[0], out_path)
         else:
-            subprocess.run(["pdfunite", *single_pdfs, out_path], check=True,
-                           capture_output=True, encoding="utf-8", errors="ignore")
+            if os.name == "nt" and any(ord(c) > 127 for c in out_path):
+                fd, temp_out = tempfile.mkstemp(suffix=".pdf", dir=get_safe_temp_dir())
+                os.close(fd)
+                try:
+                    subprocess.run(["pdfunite", *single_pdfs, temp_out], check=True,
+                                   capture_output=True, encoding="utf-8", errors="ignore")
+                    shutil.copyfile(temp_out, out_path)
+                finally:
+                    try:
+                        os.remove(temp_out)
+                    except Exception:
+                        pass
+            else:
+                subprocess.run(["pdfunite", *single_pdfs, out_path], check=True,
+                               capture_output=True, encoding="utf-8", errors="ignore")
         return len(single_pdfs)
 
     def cleanup(self):

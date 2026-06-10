@@ -150,6 +150,11 @@ def main():
         log.info("Không có folder nào để xử lý.")
         return
 
+    try:
+        from app import load_keys
+        cfg["api_keys"] = load_keys()
+    except Exception:
+        pass
     classifier = make_classifier(cfg)
     classify = make_retrying_classify(classifier, int(cfg.get("max_retries", 4)))
 

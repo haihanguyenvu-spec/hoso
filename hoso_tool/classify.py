@@ -92,20 +92,30 @@ def build_prompt(categories: list[dict], rules: list[str] | None = None) -> str:
 # GeminiClassifier (provider mặc định)
 # ============================================================
 class GeminiClassifier:
-    """Classifier mặc định: Gemini đọc PDF scan native qua Files API."""
+    """Classifier mặc định: Gemini đọc PDF scan native qua Files API. hỗ trợ xoay vòng nhiều API key."""
 
     def __init__(self, model: str, categories: list[dict],
-                 api_key: str | None = None, media_resolution: str = "medium",
+                 api_keys: list[str] | None = None, media_resolution: str = "medium",
                  rules: list[str] | None = None):
         from google import genai  # import trễ để provider khác không cần SDK này
 
-        key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        if not key:
+        # Nếu không truyền danh sách key, tìm từ môi trường hoặc key đơn
+        keys = []
+        if api_keys:
+            keys = [k.strip() for k in api_keys if k.strip()]
+        if not keys:
+            env_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+            if env_key:
+                keys = [env_key.strip()]
+        
+        if not keys:
             raise RuntimeError(
-                "Thiếu GEMINI_API_KEY. Export biến môi trường trước khi chạy:\n"
-                "  export GEMINI_API_KEY=...")
+                "Thiếu GEMINI_API_KEY. Vui lòng nhập ít nhất một API key trên giao diện hoặc cấu hình.")
+                
         self._genai = genai
-        self.client = genai.Client(api_key=key)
+        self.api_keys = keys
+        self.clients = [genai.Client(api_key=k) for k in keys]
+        self.current_idx = 0
         self.model = model
         self.media_resolution = media_resolution
         self.prompt = build_prompt(categories, rules)
@@ -113,43 +123,67 @@ class GeminiClassifier:
 
     def classify(self, pdf_path: str) -> ClassifyResult:
         types = self._genai.types
-        with open(pdf_path, "rb") as f:
-            uploaded = self.client.files.upload(
-                file=f,
-                config=dict(mime_type="application/pdf")
-            )
-        try:
-            cfg_kwargs = dict(
-                temperature=0,
-                response_mime_type="application/json",
-                response_schema=list[_PageClass],
-            )
-            try:
-                cfg = types.GenerateContentConfig(
-                    media_resolution=f"MEDIA_RESOLUTION_{self.media_resolution.upper()}",
-                    **cfg_kwargs,
-                )
-            except (TypeError, ValueError):
-                cfg = types.GenerateContentConfig(**cfg_kwargs)
+        n_keys = len(self.clients)
+        last_error = None
 
-            resp = self.client.models.generate_content(
-                model=self.model,
-                contents=[uploaded, self.prompt],
-                config=cfg,
-            )
-        finally:
+        for attempt in range(n_keys):
+            idx = (self.current_idx + attempt) % n_keys
+            client = self.clients[idx]
+            
             try:
-                self.client.files.delete(name=uploaded.name)
-            except Exception:
-                pass
+                with open(pdf_path, "rb") as f:
+                    uploaded = client.files.upload(
+                        file=f,
+                        config=dict(mime_type="application/pdf")
+                    )
+                try:
+                    cfg_kwargs = dict(
+                        temperature=0,
+                        response_mime_type="application/json",
+                        response_schema=list[_PageClass],
+                    )
+                    try:
+                        cfg = types.GenerateContentConfig(
+                            media_resolution=f"MEDIA_RESOLUTION_{self.media_resolution.upper()}",
+                            **cfg_kwargs,
+                        )
+                    except (TypeError, ValueError):
+                        cfg = types.GenerateContentConfig(**cfg_kwargs)
 
-        labels = self._parse(resp)
-        um = getattr(resp, "usage_metadata", None)
-        pt = int(getattr(um, "prompt_token_count", 0) or 0)
-        ot = int(getattr(um, "candidates_token_count", 0) or 0)
-        tt = int(getattr(um, "total_token_count", 0) or (pt + ot))
-        return ClassifyResult(labels=labels, prompt_tokens=pt, output_tokens=ot,
-                              total_tokens=tt, provider_used="gemini")
+                    resp = client.models.generate_content(
+                        model=self.model,
+                        contents=[uploaded, self.prompt],
+                        config=cfg,
+                    )
+                finally:
+                    try:
+                        client.files.delete(name=uploaded.name)
+                    except Exception:
+                        pass
+
+                # Lưu lại index của key chạy thành công
+                self.current_idx = idx
+                labels = self._parse(resp)
+                um = getattr(resp, "usage_metadata", None)
+                pt = int(getattr(um, "prompt_token_count", 0) or 0)
+                ot = int(getattr(um, "candidates_token_count", 0) or 0)
+                tt = int(getattr(um, "total_token_count", 0) or (pt + ot))
+                
+                provider_str = "gemini" if n_keys == 1 else f"gemini (Key #{idx+1})"
+                return ClassifyResult(labels=labels, prompt_tokens=pt, output_tokens=ot,
+                                      total_tokens=tt, provider_used=provider_str)
+            except Exception as e:
+                last_error = e
+                if n_keys > 1:
+                    import logging
+                    logging.getLogger("hoso").warning(
+                        "API Key #%d bị lỗi (%s). Thử chuyển sang API Key #%d...",
+                        idx + 1, str(e)[:120], ((idx + 1) % n_keys) + 1
+                    )
+                else:
+                    raise
+
+        raise last_error
 
     def _parse(self, resp) -> list[PageLabel]:
         raw = getattr(resp, "parsed", None)
@@ -210,12 +244,14 @@ class OpenAIClassifier:
 
     def _pdf_to_images_b64(self, pdf_path: str) -> list[str]:
         """Render tất cả trang PDF thành PNG (base64). Cần pdftoppm (poppler)."""
-        with tempfile.TemporaryDirectory() as d:
+        from assemble import safe_input_path, get_safe_temp_dir
+        with tempfile.TemporaryDirectory(dir=get_safe_temp_dir()) as d:
             root = os.path.join(d, "page")
-            subprocess.run(
-                ["pdftoppm", "-png", "-r", str(self.dpi), pdf_path, root],
-                check=True, capture_output=True
-            )
+            with safe_input_path(pdf_path) as safe_path:
+                subprocess.run(
+                    ["pdftoppm", "-png", "-r", str(self.dpi), safe_path, root],
+                    check=True, capture_output=True
+                )
             pngs = sorted(f for f in os.listdir(d) if f.endswith(".png"))
             result = []
             for fname in pngs:
@@ -225,11 +261,9 @@ class OpenAIClassifier:
 
     def _page_count(self, pdf_path: str) -> int:
         """Đếm số trang PDF bằng pdfinfo."""
+        from assemble import page_count
         try:
-            out = subprocess.check_output(["pdfinfo", pdf_path], stderr=subprocess.DEVNULL)
-            for line in out.decode(errors="replace").splitlines():
-                if line.startswith("Pages:"):
-                    return int(line.split(":")[1].strip())
+            return page_count(pdf_path)
         except Exception:
             pass
         return 0
@@ -396,6 +430,7 @@ def make_classifier(config: dict) -> Classifier:
         primary: Classifier = GeminiClassifier(
             model=config["model"],
             categories=config["categories"],
+            api_keys=config.get("api_keys", []),
             media_resolution=config.get("media_resolution", "medium"),
             rules=config.get("rules"),
         )
