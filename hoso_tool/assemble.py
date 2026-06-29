@@ -85,16 +85,36 @@ class PdfAssembler:
         self._separated[src_pdf] = pages
         return pages
 
-    def build(self, out_path: str, pages: list[tuple[str, int]]) -> int:
-        """Ghép `pages` = [(src_pdf, page_no), ...] theo đúng thứ tự -> out_path.
+    def build(self, out_path: str, pages: list[tuple[str, int, int]]) -> int:
+        """Ghép `pages` = [(src_pdf, page_no, rotation), ...] theo đúng thứ tự -> out_path.
 
         Trả về số trang đã ghi. Bỏ qua (src, page) không tồn tại (đã log ở pipeline).
         """
         single_pdfs: list[str] = []
-        for src_pdf, page_no in pages:
+        for src_pdf, page_no, rotation in pages:
             sep = self._separate(src_pdf)
             if page_no in sep:
-                single_pdfs.append(sep[page_no])
+                page_file = sep[page_no]
+                if rotation != 0:
+                    try:
+                        from pypdf import PdfReader, PdfWriter
+                        reader = PdfReader(page_file)
+                        writer = PdfWriter()
+                        page = reader.pages[0]
+                        # Quay trang theo chiều kim đồng hồ
+                        page.rotate(rotation)
+                        writer.add_page(page)
+                        
+                        # Tạo một file tạm đã xoay
+                        fd, rot_path = tempfile.mkstemp(suffix=".pdf", dir=get_safe_temp_dir())
+                        os.close(fd)
+                        with open(rot_path, "wb") as f:
+                            writer.write(f)
+                        page_file = rot_path
+                    except Exception as e:
+                        import logging
+                        logging.getLogger("hoso").error(f"Lỗi xoay trang {page_no} của {src_pdf}: {e}")
+                single_pdfs.append(page_file)
         if not single_pdfs:
             return 0
         os.makedirs(os.path.dirname(out_path), exist_ok=True)

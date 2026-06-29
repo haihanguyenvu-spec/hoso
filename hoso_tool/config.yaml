@@ -43,6 +43,7 @@ rules:
      danh mục vật liệu, công việc quản lý vận hành, MẪU biên bản/biểu mẫu trống, các bản vẽ
      trong phụ lục, nội quy, phần sở hữu chung, giấy cam đoan kèm hợp đồng). TẤT CẢ các trang
      này → category = hop_dong (dùng subtype phu_luc_hd cho phần phụ lục)."
+  - "VĂN BẢN CHUYỂN NHƯỢNG hoặc HỢP ĐỒNG CHUYỂN NHƯỢNG (kể cả các tài liệu đính kèm như hóa đơn, thông báo nộp tiền...) BẮT BUỘC gán category = hop_dong, subtype = vb_chuyen_nhuong_hd. TUYỆT ĐỐI KHÔNG gán nhầm sang subtype hop_dong_mua_ban."
   - "Biên bản bàn giao/kiểm tra chỉ tính bản ĐÃ ĐIỀN thông tin thực tế (có tên người, số căn
      hộ, chữ ký). KHÔNG xếp 'MẪU' biểu mẫu TRỐNG nằm trong phụ lục hợp đồng vào đây — cái đó là hop_dong."
   - "Bản vẽ sơ đồ ĐỘC LẬP (nộp kèm hồ sơ thuế/đăng ký, KHÔNG nằm trong phụ lục hợp đồng) →
@@ -82,12 +83,12 @@ categories:
     name: "Hợp đồng"
     required: true
     subtypes:
+      - id: vb_chuyen_nhuong_hd
+        desc: "Văn bản hoặc Hợp đồng chuyển nhượng hợp đồng mua bán"
+        keywords: ["VĂN BẢN CHUYỂN NHƯỢNG", "HỢP ĐỒNG CHUYỂN NHƯỢNG", "chuyển nhượng"]
       - id: hop_dong_mua_ban
         desc: "Hợp đồng mua bán nhà ở / căn hộ"
         keywords: ["HỢP ĐỒNG MUA BÁN", "căn hộ", "nhà ở"]
-      - id: vb_chuyen_nhuong_hd
-        desc: "Văn bản chuyển nhượng hợp đồng mua bán"
-        keywords: ["VĂN BẢN CHUYỂN NHƯỢNG HỢP ĐỒNG", "chuyển nhượng hợp đồng mua bán"]
       - id: uy_quyen_ben_ban
         desc: "Giấy ủy quyền của BÊN BÁN/chủ đầu tư (Tổng GĐ thay mặt Công ty ủy quyền cho người của công ty ký hợp đồng mua bán) — đi kèm hợp đồng"
         keywords: ["GIẤY ỦY QUYỀN", "thay mặt Công ty", "Tổng Giám đốc", "Phó Tổng Giám đốc", "Người được ủy quyền", "ký kết"]

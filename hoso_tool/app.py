@@ -172,6 +172,29 @@ if "api_keys" not in st.session_state:
 
 st.sidebar.title("📂 Phân loại & Ghép hồ sơ PDF")
 st.sidebar.caption("© Nguyễn Vũ Hải Hà @ 2026")
+
+# --- Chọn model Gemini ---
+MODEL_OPTIONS = ["gemini-2.5-flash", "gemini-3.5-flash"]
+if "selected_model" not in st.session_state:
+    # Lấy model mặc định từ config, nếu không có trong danh sách thì dùng cái đầu tiên
+    default_model = cfg.get("model", "gemini-2.5-flash")
+    st.session_state.selected_model = default_model if default_model in MODEL_OPTIONS else MODEL_OPTIONS[0]
+
+with st.sidebar:
+    selected_model = st.selectbox(
+        "🤖 Mô hình AI",
+        options=MODEL_OPTIONS,
+        index=MODEL_OPTIONS.index(st.session_state.selected_model),
+        key="model_selector",
+        help="Gemini 3.5 Flash mới hơn, thông minh hơn nhưng có thể hay bị nghẽn (503). "
+             "Gemini 2.5 Flash ổn định hơn, ít bị quá tải."
+    )
+    st.session_state.selected_model = selected_model
+    # Cập nhật model đã chọn vào config
+    cfg["model"] = selected_model
+    if "fallback" in cfg:
+        cfg["fallback"]["model"] = selected_model
+
 st.sidebar.caption(f"Model: **{cfg['provider']} / {cfg['model']}**")
 st.sidebar.markdown("---")
 

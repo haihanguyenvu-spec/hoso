@@ -73,7 +73,8 @@ def classify_folder(folder: str, config: dict,
         for lb in result.labels:
             entries.append(dict(file_index=fi, file=os.path.basename(pdf), page=lb.page,
                                 category=lb.category, subtype=lb.subtype,
-                                confidence=lb.confidence, evidence=lb.evidence))
+                                confidence=lb.confidence, evidence=lb.evidence,
+                                rotation=getattr(lb, "rotation", 0)))
         usage["prompt_tokens"] += result.prompt_tokens
         usage["output_tokens"] += result.output_tokens
         usage["total_tokens"] += result.total_tokens
@@ -113,6 +114,16 @@ def assemble_from_index(folder: str, config: dict, entries: list[dict],
         for c in categories:
             key, name = c["key"], c["name"]
             bucket = [e for e in entries if e["category"] == key]
+            
+            # Khắc phục lỗi LLM trả sai subtype: Nếu evidence HOẶC tên file chứa chữ "chuyển nhượng", "chuyen nhuong", "hdcn", "vbcn"...
+            if key == "hop_dong":
+                for e in bucket:
+                    ev = str(e.get("evidence", "")).lower()
+                    fname = str(e.get("file", "")).lower()
+                    kw_list = ["chuyển nhượng", "chuyen nhuong", "hdcn", "vbcn", "sang nhượng", "sang nhuong"]
+                    if any(k in ev for k in kw_list) or any(k in fname for k in kw_list):
+                        e["subtype"] = "vb_chuyen_nhuong_hd"
+
             if not bucket:
                 if cat_required.get(key):
                     res.categories_missing.append(name)
@@ -120,7 +131,7 @@ def assemble_from_index(folder: str, config: dict, entries: list[dict],
             order = sub_order.get(key, {})
             bucket.sort(key=lambda e: (order.get(e["subtype"], 999),
                                        e["file_index"], e["page"]))
-            pages = [(os.path.join(folder, e["file"]), e["page"]) for e in bucket]
+            pages = [(os.path.join(folder, e["file"]), e["page"], int(e.get("rotation", 0))) for e in bucket]
             out_path = os.path.join(out_dir, f"{prefix}_{name}.pdf")
             if dry_run:
                 written = len(pages)
@@ -187,10 +198,10 @@ def process_folder(folder: str, config: dict,
 def write_index(path: str, entries: list[dict]):
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["file", "page", "category", "subtype", "confidence", "evidence"])
+        w.writerow(["file", "page", "category", "subtype", "confidence", "evidence", "rotation"])
         for e in sorted(entries, key=lambda e: (e["file_index"], e["page"])):
             w.writerow([e["file"], e["page"], e["category"], e["subtype"],
-                        f"{float(e['confidence']):.2f}", e["evidence"]])
+                        f"{float(e['confidence']):.2f}", e["evidence"], e.get("rotation", 0)])
 
 
 def read_index(folder: str, config: dict) -> list[dict]:
@@ -207,5 +218,5 @@ def read_index(folder: str, config: dict) -> list[dict]:
                 file_index=file_index.get(row["file"], 0), file=row["file"],
                 page=int(row["page"]), category=row["category"],
                 subtype=row.get("subtype", ""), confidence=float(row["confidence"] or 0),
-                evidence=row.get("evidence", "")))
+                evidence=row.get("evidence", ""), rotation=int(row.get("rotation", 0) or 0)))
     return entries

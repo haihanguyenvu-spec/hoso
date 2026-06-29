@@ -27,6 +27,7 @@ class PageLabel:
     subtype: str         # id sub-type, hoặc ""
     confidence: float    # 0..1
     evidence: str        # cụm chữ model thấy (để con người đối chiếu)
+    rotation: int        # 0, 90, 180, 270 (số độ cần xoay để chữ nằm thẳng)
 
 
 @dataclass
@@ -53,6 +54,7 @@ class _PageClass(BaseModel):
     subtype: str
     confidence: float
     evidence: str
+    rotation: int
 
 
 def build_prompt(categories: list[dict], rules: list[str] | None = None) -> str:
@@ -84,6 +86,7 @@ def build_prompt(categories: list[dict], rules: list[str] | None = None) -> str:
         "- subtype: đúng một 'subtype' của loại đó, hoặc '' nếu không chắc subtype.",
         "- confidence: 0..1 (độ chắc chắn của bạn cho trang đó).",
         "- evidence: trích NGẮN tiêu đề/cụm chữ tiếng Việt bạn nhìn thấy làm căn cứ.",
+        "- rotation: số nguyên 0, 90, 180, hoặc 270. Hãy nhìn chiều của chữ trong ảnh. Nếu ảnh bị ngược 180 độ, trả về 180. Nếu nằm ngang, trả về 90 hoặc 270 tương ứng để xoay ảnh thẳng đứng lại. Nếu ảnh đã thẳng đứng (đọc được bình thường), trả về 0.",
     ]
     return "\n".join(lines)
 
@@ -136,6 +139,16 @@ class GeminiClassifier:
                         file=f,
                         config=dict(mime_type="application/pdf")
                     )
+                
+                # Chờ file xử lý xong trên server của Gemini
+                import time
+                while uploaded.state.name == "PROCESSING":
+                    time.sleep(2)
+                    uploaded = client.files.get(name=uploaded.name)
+                if uploaded.state.name == "FAILED":
+                    client.files.delete(name=uploaded.name)
+                    raise RuntimeError("File upload lên Gemini bị lỗi xử lý (FAILED).")
+
                 try:
                     cfg_kwargs = dict(
                         temperature=0,
@@ -206,6 +219,7 @@ class GeminiClassifier:
                 subtype=str(d.get("subtype") or ""),
                 confidence=float(d.get("confidence", 0.0)),
                 evidence=str(d.get("evidence") or "")[:200],
+                rotation=int(d.get("rotation", 0)),
             ))
         labels.sort(key=lambda x: x.page)
         return labels
@@ -323,7 +337,7 @@ class OpenAIClassifier:
         except json.JSONDecodeError:
             # Fallback: trả khong_thuoc cho tất cả trang
             return [PageLabel(page=i, category="khong_thuoc", subtype="",
-                              confidence=0.0, evidence="parse error")
+                              confidence=0.0, evidence="parse error", rotation=0)
                     for i in range(1, n_pages + 1)]
 
         # Có thể là {"pages": [...]} hoặc {"results": [...]} hoặc trực tiếp [...]
@@ -352,6 +366,7 @@ class OpenAIClassifier:
                 subtype=str(item.get("subtype") or ""),
                 confidence=float(item.get("confidence", 0.0)),
                 evidence=str(item.get("evidence") or "")[:200],
+                rotation=int(item.get("rotation", 0)),
             ))
         labels.sort(key=lambda x: x.page)
         return labels
