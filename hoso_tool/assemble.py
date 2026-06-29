@@ -95,6 +95,36 @@ class PdfAssembler:
             sep = self._separate(src_pdf)
             if page_no in sep:
                 page_file = sep[page_no]
+                # Fallback: Tự động chạy Tesseract OSD nếu không có metadata rotation
+                if rotation == 0:
+                    try:
+                        import pytesseract
+                        from PIL import Image
+                        # Render trang đơn này thành file ảnh tạm thời để OSD nhận diện
+                        with tempfile.TemporaryDirectory(dir=get_safe_temp_dir()) as ocr_tmp:
+                            img_p = os.path.join(ocr_tmp, "ocr_page")
+                            subprocess.run(
+                                ["pdftoppm", "-png", "-r", "150", page_file, img_p],
+                                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                            )
+                            # Tìm file png được render ra
+                            import glob
+                            pngs = glob.glob(img_p + "*.png")
+                            if pngs:
+                                osd = pytesseract.image_to_osd(Image.open(pngs[0]))
+                                m = re.search(r"Rotate:\s*(\d+)", osd)
+                                if m:
+                                    tess_rot = int(m.group(1))
+                                    if tess_rot != 0:
+                                        rotation = tess_rot
+                                        import logging
+                                        logging.getLogger("hoso").info(
+                                            f"Tesseract OCR phát hiện trang {page_no} của {os.path.basename(src_pdf)} bị xoay lệch, tự động sửa: xoay {tess_rot} độ"
+                                        )
+                    except Exception as ocr_err:
+                        # Bỏ qua nếu không có tesseract hoặc lỗi nhận diện
+                        pass
+
                 if rotation != 0:
                     try:
                         from pypdf import PdfReader, PdfWriter
