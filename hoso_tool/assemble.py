@@ -70,7 +70,9 @@ class PdfAssembler:
     def _separate(self, src_pdf: str) -> dict[int, str]:
         if src_pdf in self._separated:
             return self._separated[src_pdf]
-        key = re.sub(r"[^0-9A-Za-z]+", "_", os.path.basename(src_pdf))[:40]
+        import hashlib
+        key_base = os.path.basename(src_pdf).encode("utf-8")
+        key = hashlib.md5(key_base).hexdigest()
         outdir = os.path.join(self.workdir, key)
         os.makedirs(outdir, exist_ok=True)
         pattern = os.path.join(outdir, "p-%d.pdf")
