@@ -18,7 +18,7 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(__file__))
 import pipeline  # noqa: E402
-from classify import make_classifier  # noqa: E402
+from classify import _provider_of_model, make_classifier  # noqa: E402
 from run import make_retrying_classify  # noqa: E402  (tự thử lại khi API lỗi tạm thời)
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
@@ -144,34 +144,48 @@ def get_api_key_2() -> str | None:
     return None
 
 
-def load_keys() -> list[str]:
+DEFAULT_PROVIDER = "gemini"
+# Nhà cung cấp cho từng API key (cùng 1 key dùng mọi model của nhà đó).
+PROVIDER_LABELS = {"gemini": "Google (Gemini)", "qwen": "Qwen (DashScope)", "openai": "OpenAI"}
+
+
+def load_key_specs() -> list[dict]:
+    """Trả list [{'provider':..., 'key':...}]. Tự chuyển định dạng CŨ ({model,key} hoặc mảng chuỗi)."""
     import json
     p = key_path("keys.json")
     if os.path.exists(p):
         try:
             with open(p, encoding="utf-8") as f:
-                keys = json.load(f)
-                if isinstance(keys, list):
-                    return [k.strip() for k in keys if k.strip()]
+                data = json.load(f)
+            specs = []
+            for item in (data or []):
+                if isinstance(item, dict) and (item.get("key") or "").strip():
+                    prov = (item.get("provider") or "").strip().lower()
+                    if not prov:                      # spec cũ {model,key} -> suy provider
+                        prov = _provider_of_model(item.get("model") or DEFAULT_PROVIDER)
+                    specs.append({"provider": prov or DEFAULT_PROVIDER, "key": item["key"].strip()})
+                elif isinstance(item, str) and item.strip():
+                    specs.append({"provider": DEFAULT_PROVIDER, "key": item.strip()})
+            if specs:
+                return specs
         except Exception:
             pass
-    # Fallback legacy
+    # Legacy: các file .gemini_key rời
     legacy = []
-    k1 = get_api_key()
-    if k1:
-        legacy.append(k1)
-    k2 = get_api_key_2()
-    if k2:
-        legacy.append(k2)
+    for k in (get_api_key(), get_api_key_2()):
+        if k:
+            legacy.append({"provider": DEFAULT_PROVIDER, "key": k})
     return legacy
 
 
-def save_keys(keys: list[str]):
+def save_key_specs(specs: list[dict]):
     import json
     p = key_path("keys.json")
+    clean = [{"provider": (s.get("provider") or DEFAULT_PROVIDER).strip().lower(), "key": s["key"].strip()}
+             for s in specs if (s.get("key") or "").strip()]
     try:
         with open(p, "w", encoding="utf-8") as f:
-            json.dump([k.strip() for k in keys if k.strip()], f, ensure_ascii=False, indent=2)
+            json.dump(clean, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
@@ -328,6 +342,56 @@ def render_doc_types_editor(cfg: dict):
         st.rerun()
 
 
+def render_api_keys_editor(cfg: dict):
+    """Trình quản lý API key (mỗi key gắn 1 NHÀ CUNG CẤP). Render ở vùng chính (panel Cài đặt)."""
+    st.caption("Mỗi key chỉ cần chọn **nhà cung cấp** (cùng key dùng mọi model của nhà đó). "
+               "**Model** do **chế độ chạy** (thanh bên) quyết định; hệ thống tự lấy key của nhà "
+               "tương ứng và fallback lần lượt khi lỗi.")
+    prov_ids = list(PROVIDER_LABELS.keys())
+    to_delete = None
+    for idx, spec in enumerate(st.session_state.key_specs):
+        cur = (spec.get("provider") or DEFAULT_PROVIDER).lower()
+        if cur not in prov_ids:
+            cur = DEFAULT_PROVIDER
+        c_prov, c_key, c_del = st.columns([2, 4, 0.6])
+        with c_prov:
+            spec["provider"] = st.selectbox(
+                f"Nhà cung cấp key #{idx+1}", options=prov_ids, index=prov_ids.index(cur),
+                format_func=lambda p: PROVIDER_LABELS[p],
+                key=f"key_prov_{idx}", label_visibility="collapsed")
+        with c_key:
+            spec["key"] = st.text_input(
+                f"Key #{idx+1}", value=spec.get("key", ""), type="password",
+                key=f"key_val_{idx}", label_visibility="collapsed",
+                placeholder=f"Dán API key #{idx+1}…").strip()
+        with c_del:
+            if st.button("❌", key=f"del_key_{idx}", help=f"Xóa key #{idx+1}"):
+                to_delete = idx
+
+    if to_delete is not None:
+        st.session_state.key_specs.pop(to_delete)
+        for i in range(len(st.session_state.key_specs) + 1):
+            st.session_state.pop(f"key_val_{i}", None)
+            st.session_state.pop(f"key_prov_{i}", None)
+        if not st.session_state.key_specs:
+            st.session_state.key_specs = [{"provider": DEFAULT_PROVIDER, "key": ""}]
+        save_key_specs(st.session_state.key_specs)
+        st.rerun()
+
+    a1, a2 = st.columns(2)
+    if a1.button("➕ Thêm key", use_container_width=True):
+        last_prov = (st.session_state.key_specs[-1].get("provider")
+                     if st.session_state.key_specs else DEFAULT_PROVIDER)
+        st.session_state.key_specs.append({"provider": last_prov or DEFAULT_PROVIDER, "key": ""})
+        st.rerun()
+    if a2.button("💾 Lưu API keys", use_container_width=True, type="primary"):
+        st.session_state.key_specs = ([s for s in st.session_state.key_specs if s.get("key")]
+                                      or [{"provider": DEFAULT_PROVIDER, "key": ""}])
+        save_key_specs(st.session_state.key_specs)
+        st.toast("Đã lưu danh sách API Keys!")
+        st.rerun()
+
+
 # ---------- UI ----------
 st.set_page_config(page_title="Phân loại & Ghép hồ sơ PDF", page_icon="📄", layout="wide", initial_sidebar_state="expanded")
 # Ẩn các nút/chrome mặc định của Streamlit (menu ⋮, Deploy, footer "Made with Streamlit")
@@ -342,92 +406,62 @@ footer {visibility: hidden;}
 cfg = load_config()
 name_by_key, key_by_name = label_maps(cfg)
 
-if "api_keys" not in st.session_state:
-    st.session_state.api_keys = load_keys() or [""]
+if "key_specs" not in st.session_state:
+    st.session_state.key_specs = load_key_specs() or [{"provider": DEFAULT_PROVIDER, "key": ""}]
 
 st.sidebar.title("📂 Phân loại & Ghép hồ sơ PDF")
 st.sidebar.caption("© Nguyễn Vũ Hải Hà @ 2026")
 
-# --- Chọn model Gemini ---
-MODEL_OPTIONS = ["gemini-2.5-flash", "gemini-3.5-flash"]
-if "selected_model" not in st.session_state:
-    # Lấy model mặc định từ config, nếu không có trong danh sách thì dùng cái đầu tiên
-    default_model = cfg.get("model", "gemini-2.5-flash")
-    st.session_state.selected_model = default_model if default_model in MODEL_OPTIONS else MODEL_OPTIONS[0]
+# --- Chế độ chạy (Nhanh / Chậm) — thay cho việc chọn model lẻ ---
+MODE_LABELS = {"cham": "🐢 Chậm", "nhanh": "⚡ Nhanh"}
+if "run_mode" not in st.session_state:
+    st.session_state.run_mode = (cfg.get("default_mode") or "cham").lower()
 
 with st.sidebar:
-    selected_model = st.selectbox(
-        "🤖 Mô hình AI",
-        options=MODEL_OPTIONS,
-        index=MODEL_OPTIONS.index(st.session_state.selected_model),
-        key="model_selector",
-        help="Gemini 3.5 Flash mới hơn, thông minh hơn nhưng có thể hay bị nghẽn (503). "
-             "Gemini 2.5 Flash ổn định hơn, ít bị quá tải."
+    _mkeys = list(MODE_LABELS.keys())
+    _cur = st.session_state.run_mode if st.session_state.run_mode in _mkeys else "cham"
+    run_mode = st.radio(
+        "⚙️ Chế độ chạy",
+        options=_mkeys,
+        index=_mkeys.index(_cur),
+        format_func=lambda m: MODE_LABELS[m],
+        horizontal=True,
+        key="run_mode_selector",
+        help="Nhanh: " + " → ".join(cfg.get("modes", {}).get("nhanh", []))
+             + "\n\nChậm: " + " → ".join(cfg.get("modes", {}).get("cham", [])),
     )
-    st.session_state.selected_model = selected_model
-    # Cập nhật model đã chọn vào config
-    cfg["model"] = selected_model
-    if "fallback" in cfg:
-        cfg["fallback"]["model"] = selected_model
+    st.session_state.run_mode = run_mode
+    cfg["mode"] = run_mode
+    _mode_models = cfg.get("modes", {}).get(run_mode, [])
+    st.caption("Model: **" + (" → ".join(_mode_models) or "?") + "**")
 
-st.sidebar.caption(f"Model: **{cfg['provider']} / {cfg['model']}**")
 st.sidebar.markdown("---")
 
+# --- Nút CÀI ĐẶT: ẩn API key + danh mục chứng từ khỏi màn hình vận hành ---
+# Dùng cờ session (không phải widget-key) để nút bật/tắt được an toàn.
+if "settings_open" not in st.session_state:
+    st.session_state.settings_open = False
 with st.sidebar:
-    st.markdown("**🔑 Danh sách API Keys (Gemini)**")
-    
-    new_keys_len = len(st.session_state.api_keys)
-    to_delete = None
-    
-    for idx in range(new_keys_len):
-        col_in, col_btn = st.columns([5, 1])
-        with col_in:
-            val = st.text_input(
-                f"Key #{idx+1}",
-                value=st.session_state.api_keys[idx],
-                type="password",
-                key=f"key_input_val_{idx}"
-            ).strip()
-            # Cập nhật giá trị vào session state ngay lập tức
-            st.session_state.api_keys[idx] = val
-        with col_btn:
-            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-            if st.button("❌", key=f"del_key_{idx}", help=f"Xóa Key #{idx+1}"):
-                to_delete = idx
-
-    if to_delete is not None:
-        st.session_state.api_keys.pop(to_delete)
-        # Xóa widget states để tránh lưu dữ liệu rác
-        for i in range(len(st.session_state.api_keys) + 1):
-            if f"key_input_val_{i}" in st.session_state:
-                del st.session_state[f"key_input_val_{i}"]
-        if not st.session_state.api_keys:
-            st.session_state.api_keys = [""]
-        save_keys([k for k in st.session_state.api_keys if k])
+    _n_keys = sum(1 for s in st.session_state.key_specs if s.get("key"))
+    _ov = read_doc_types_override() is not None
+    st.caption(f"🔑 {_n_keys} key · 📄 danh mục: {'tùy chỉnh' if _ov else 'mặc định'}")
+    if st.button(("✖️ Đóng cài đặt" if st.session_state.settings_open else "⚙️ Cài đặt"),
+                 use_container_width=True):
+        st.session_state.settings_open = not st.session_state.settings_open
         st.rerun()
 
-    if st.button("➕ Thêm API Key", use_container_width=True):
-        st.session_state.api_keys.append("")
+# --- Panel CÀI ĐẶT (chiếm trọn vùng chính; ẩn phần vận hành khi mở) ---
+if st.session_state.settings_open:
+    st.markdown("## ⚙️ Cài đặt")
+    if st.button("← Quay lại vận hành", key="back_to_ops"):
+        st.session_state.settings_open = False
         st.rerun()
-
-    if st.button("💾 Lưu tất cả key", use_container_width=True):
-        final_keys = [k for k in st.session_state.api_keys if k]
-        st.session_state.api_keys = final_keys if final_keys else [""]
-        save_keys(final_keys)
-        st.toast("Đã lưu danh sách API Keys!")
-        st.rerun()
-
-    st.sidebar.markdown("---")
-
-# --- Cấu hình loại chứng từ (thêm/bớt theo thời kỳ) ---
-# Không bọc trong st.expander vì trình chỉnh đã dùng expander cho mỗi loại
-# (Streamlit không cho lồng expander) — dùng công tắc ở cấp cao nhất.
-_override_on = read_doc_types_override() is not None
-_dt_label = "⚙️ Cấu hình loại chứng từ (thêm / bớt / đổi tên)" + (
-    "  ·  🟢 đang dùng cấu hình tùy chỉnh" if _override_on else "  ·  ⚪ mặc định")
-if st.toggle(_dt_label, value=False, key="dt_editor_on"):
-    render_doc_types_editor(cfg)
-st.divider()
+    tab_keys, tab_docs = st.tabs(["🔑 API Keys", "📄 Danh mục chứng từ"])
+    with tab_keys:
+        render_api_keys_editor(cfg)
+    with tab_docs:
+        render_doc_types_editor(cfg)
+    st.stop()
 
 # --- Ô nhập thư mục gốc (trước tabs, dùng chung cho cả 3 tab) ---
 st.markdown("### 📁 Thư mục gốc chứa các folder hồ sơ")
@@ -486,12 +520,20 @@ with tab1:
                      "Nếu tắt (mặc định): các folder đã ghép sẽ bị bỏ qua dù có chọn.")
 
         out_subdir = cfg.get("output_subdir", "output")
-        api_keys_active = [k for k in st.session_state.api_keys if k.strip()]
-        btn_disabled = not (pick and api_keys_active)
+        key_specs_active = [{"provider": s.get("provider", DEFAULT_PROVIDER), "key": s["key"].strip()}
+                            for s in st.session_state.key_specs if s.get("key", "").strip()]
+        # Cảnh báo nếu chế độ cần nhà cung cấp mà chưa có key
+        _need = {_provider_of_model(m) for m in cfg.get("modes", {}).get(cfg.get("mode", ""), [])}
+        _have = {s["provider"] for s in key_specs_active}
+        if key_specs_active and _need and not (_have & _need):
+            _lbl = ", ".join(PROVIDER_LABELS.get(p, p) for p in _need)
+            st.warning(f"⚠️ Chế độ **{cfg.get('mode')}** cần key của: **{_lbl}** nhưng chưa có. "
+                       "Vào ⚙️ Cài đặt để thêm key đúng nhà cung cấp.")
+        btn_disabled = not (pick and key_specs_active)
         if st.button("▶ Phân loại & Tạo 6 file PDF", type="primary", disabled=btn_disabled):
             st.toast("⏳ Đang khởi tạo bộ xử lý...", icon="🚀")
             with st.spinner("Đang chuẩn bị mô hình..."):
-                cfg["api_keys"] = api_keys_active
+                cfg["key_specs"] = key_specs_active
                 classifier = make_classifier(cfg)
                 classify = make_retrying_classify(classifier, int(cfg.get("max_retries", 4)))
                 sel = [f for f in folders if os.path.basename(f) in pick]

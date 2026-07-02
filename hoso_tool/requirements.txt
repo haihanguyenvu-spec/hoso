@@ -9,3 +9,5 @@ pypdf==5.1.0
 #   macOS: brew install tesseract · Ubuntu: apt install tesseract-ocr
 pytesseract==0.3.13
 Pillow>=10.0
+# Dùng cho classifier OpenAI VÀ Qwen (Qwen chạy qua endpoint tương thích OpenAI của DashScope).
+openai>=1.0

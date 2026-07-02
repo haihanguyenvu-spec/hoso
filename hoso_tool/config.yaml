@@ -8,10 +8,24 @@ input_root: "/Users/haihanguyenvu/Library/CloudStorage/GoogleDrive-haiha@pmh.com
 output_subdir: "output"
 
 # ---- Provider / model (kiến trúc tách-vendor) ----
-provider: "gemini"            # gemini | openai | deepseek
-model: "gemini-2.5-flash"     # đổi sang gemini-2.0-flash / -flash-lite tùy nhu cầu
+provider: "gemini"            # gemini | openai | deepseek | qwen
+model: "gemini-2.5-flash"     # dùng khi KHÔNG chọn chế độ (fallback tương thích ngược)
 # media_resolution: gemini ánh xạ low/medium/high -> token/trang. Trang scan tiếng Việt nên >= medium.
 media_resolution: "medium"    # low | medium | high
+
+# ---- CHẾ ĐỘ CHẠY (thay cho việc chọn từng model trên UI) ----
+# Mỗi chế độ = danh sách model thử theo THỨ TỰ (tự fallback chéo nhà cung cấp).
+# Tiền tố model quyết định vendor: 'gemini*' -> Google · 'qwen*' -> Qwen (DashScope, API kiểu OpenAI) · 'gpt*' -> OpenAI.
+# Chỉ những key có model KHỚP mới được dùng cho chế độ đó (đặt model cho từng key trên UI).
+default_mode: "cham"          # nhanh | cham  (mặc định: chậm)
+modes:
+  nhanh: ["gemini-3.5-flash", "qwen3.7-plus"]   # nhanh: Google 3.5 + Qwen 3.7-plus
+  cham:  ["qwen3.6-flash"]                        # chậm: Qwen 3.6-flash
+# Danh sách model cho ô chọn khi nhập TỪNG API key trên UI.
+key_model_options: ["gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.0-flash", "qwen3.7-plus", "qwen3.6-flash"]
+# Endpoint Qwen (DashScope, tương thích OpenAI). Bản quốc tế: dashscope-intl; TQ đại lục: bỏ '-intl'.
+# LƯU Ý: sửa ID model qwen ở trên cho khớp ID thật của tài khoản DashScope nếu cần.
+qwen_base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 
 # ---- Fallback provider (tự động dùng khi primary bị 503/quá tải) ----
 # Bình luận/xoá section này nếu không muốn fallback.

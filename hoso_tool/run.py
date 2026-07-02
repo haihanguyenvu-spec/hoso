@@ -111,6 +111,7 @@ def main():
     ap.add_argument("--input-root")
     ap.add_argument("--folder", help="Chỉ xử lý 1 folder căn hộ (calibrate)")
     ap.add_argument("--model")
+    ap.add_argument("--mode", choices=["nhanh", "cham"], help="Chế độ chạy (mặc định theo config)")
     ap.add_argument("--workers", type=int)
     ap.add_argument("--confidence-threshold", type=float, dest="confidence_threshold")
     ap.add_argument("--media-resolution", dest="media_resolution", choices=["low", "medium", "high"])
@@ -161,11 +162,23 @@ def main():
         p = os.path.join(d, "keys.json")
         if os.path.exists(p):
             with open(p, encoding="utf-8") as f:
-                keys = json.load(f)
-                if isinstance(keys, list):
-                    cfg["api_keys"] = [k.strip() for k in keys if k.strip()]
+                data = json.load(f)
+            from classify import _provider_of_model
+            specs = []
+            for item in (data or []):
+                if isinstance(item, dict) and (item.get("key") or "").strip():
+                    prov = (item.get("provider") or "").strip().lower()
+                    if not prov:                       # migrate spec cũ {model,key}
+                        prov = _provider_of_model(item.get("model") or "gemini")
+                    specs.append({"provider": prov, "key": item["key"].strip()})
+                elif isinstance(item, str) and item.strip():   # định dạng cũ (mảng chuỗi)
+                    specs.append({"provider": "gemini", "key": item.strip()})
+            if specs:
+                cfg["key_specs"] = specs
     except Exception:
         pass
+    # Chế độ chạy: CLI --mode > config default_mode
+    cfg["mode"] = (args.mode or cfg.get("default_mode") or "cham").lower()
     classifier = make_classifier(cfg)
     classify = make_retrying_classify(classifier, int(cfg.get("max_retries", 4)))
 

@@ -57,6 +57,44 @@ class _PageClass(BaseModel):
     rotation: int
 
 
+def _salvage_json_objects(text: str) -> list[dict]:
+    """Cứu các object {...} HOÀN CHỈNH từ một mảng JSON bị cắt cụt.
+
+    Khi response model quá dài bị cắt giữa chừng, json.loads hỏng toàn bộ. Hàm này
+    quét theo độ sâu ngoặc để lấy ra tối đa các phần tử đã đóng đầy đủ (bỏ phần tử
+    dở dang cuối). Trả list dict; [] nếu không cứu được gì.
+    """
+    out: list[dict] = []
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                try:
+                    out.append(json.loads(text[start:i + 1]))
+                except json.JSONDecodeError:
+                    pass
+                start = -1
+    return out
+
+
 def build_prompt(categories: list[dict], rules: list[str] | None = None) -> str:
     """Dựng prompt tiếng Việt liệt kê 6 loại + sub-type + từ khóa + quy tắc nghiệp vụ."""
     lines = [
@@ -154,6 +192,9 @@ class GeminiClassifier:
                         temperature=0,
                         response_mime_type="application/json",
                         response_schema=list[_PageClass],
+                        # Hồ sơ dài (>90 trang) sinh JSON lớn; nếu không nới trần
+                        # output, response bị CẮT CỤT → thiếu nhãn các trang cuối.
+                        max_output_tokens=int(os.environ.get("HOSO_MAX_OUTPUT_TOKENS", "65000")),
                     )
                     try:
                         cfg = types.GenerateContentConfig(
@@ -205,7 +246,14 @@ class GeminiClassifier:
             if text.startswith("```"):
                 text = text.strip("`")
                 text = text[text.find("["):]
-            raw = json.loads(text)
+            try:
+                raw = json.loads(text)
+            except json.JSONDecodeError:
+                # Response bị CẮT CỤT (JSON không đóng) → cứu các object hoàn chỉnh
+                # thay vì hỏng toàn bộ. Tốt hơn là mất vài trang cuối còn hơn mất cả file.
+                raw = _salvage_json_objects(text)
+                if not raw:
+                    raise
 
         labels: list[PageLabel] = []
         for item in raw:
@@ -243,16 +291,25 @@ class OpenAIClassifier:
     PRICE_OUT = 0.60
 
     def __init__(self, model: str, categories: list[dict],
-                 api_key: str | None = None, dpi: int = 150,
-                 rules: list[str] | None = None):
-        key = api_key or os.environ.get("OPENAI_API_KEY")
-        if not key:
+                 api_key: str | None = None, api_keys: list[str] | None = None,
+                 dpi: int = 150, rules: list[str] | None = None,
+                 base_url: str | None = None, provider_name: str = "openai",
+                 env_key: str = "OPENAI_API_KEY"):
+        keys = [k.strip() for k in (api_keys or []) if k and k.strip()]
+        if not keys and api_key:
+            keys = [api_key.strip()]
+        if not keys:
+            env = os.environ.get(env_key)
+            if env:
+                keys = [env.strip()]
+        if not keys:
             raise RuntimeError(
-                "Thiếu OPENAI_API_KEY. Export biến môi trường:\n"
-                "  export OPENAI_API_KEY=sk-...")
-        self.api_key = key
+                f"Thiếu API key cho {provider_name}. Nhập key trên UI hoặc export {env_key}=...")
+        self.api_keys = keys
         self.model = model
         self.dpi = dpi
+        self.base_url = base_url
+        self.provider_name = provider_name
         self.prompt = build_prompt(categories, rules)
         self.valid_categories = {c["key"] for c in categories} | {"khong_thuoc"}
 
@@ -289,7 +346,6 @@ class OpenAIClassifier:
             raise RuntimeError(
                 "Chưa cài openai SDK. Chạy: pip install openai>=1.0") from e
 
-        client = OpenAI(api_key=self.api_key)
         images_b64 = self._pdf_to_images_b64(pdf_path)
         n_pages = len(images_b64)
 
@@ -305,22 +361,39 @@ class OpenAIClassifier:
                 "image_url": {"url": f"data:image/png;base64,{b64}", "detail": "auto"}
             })
 
-        resp = client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": content}],
-            temperature=0,
-            response_format={"type": "json_object"},
-            max_tokens=4096,
-        )
-
-        raw_text = resp.choices[0].message.content or ""
-        labels = self._parse(raw_text, n_pages)
-
-        usage = resp.usage
-        pt = int(getattr(usage, "prompt_tokens", 0) or 0)
-        ot = int(getattr(usage, "completion_tokens", 0) or 0)
-        return ClassifyResult(labels=labels, prompt_tokens=pt, output_tokens=ot,
-                              total_tokens=pt + ot, provider_used="openai")
+        # Trần output đủ lớn cho hồ sơ dài (tránh cắt cụt JSON). Có thể chỉnh qua env.
+        max_tok = int(os.environ.get("HOSO_OPENAI_MAX_TOKENS", "16000"))
+        last_error = None
+        for i, key in enumerate(self.api_keys):
+            try:
+                client = (OpenAI(api_key=key, base_url=self.base_url)
+                          if self.base_url else OpenAI(api_key=key))
+                resp = client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": content}],
+                    temperature=0,
+                    response_format={"type": "json_object"},
+                    max_tokens=max_tok,
+                )
+                raw_text = resp.choices[0].message.content or ""
+                labels = self._parse(raw_text, n_pages)
+                usage = resp.usage
+                pt = int(getattr(usage, "prompt_tokens", 0) or 0)
+                ot = int(getattr(usage, "completion_tokens", 0) or 0)
+                pname = (self.provider_name if len(self.api_keys) == 1
+                         else f"{self.provider_name} (Key #{i + 1})")
+                return ClassifyResult(labels=labels, prompt_tokens=pt, output_tokens=ot,
+                                      total_tokens=pt + ot, provider_used=pname)
+            except Exception as e:
+                last_error = e
+                if len(self.api_keys) > 1:
+                    import logging
+                    logging.getLogger("hoso").warning(
+                        "%s Key #%d lỗi (%s) — thử key kế...",
+                        self.provider_name, i + 1, str(e)[:120])
+                else:
+                    raise
+        raise last_error if last_error else RuntimeError("Không gọi được API")
 
     def _parse(self, raw_text: str, n_pages: int) -> list[PageLabel]:
         """Parse JSON từ OpenAI. Model trả về {"pages": [...]} hoặc trực tiếp [...]."""
@@ -335,10 +408,13 @@ class OpenAIClassifier:
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
-            # Fallback: trả khong_thuoc cho tất cả trang
-            return [PageLabel(page=i, category="khong_thuoc", subtype="",
-                              confidence=0.0, evidence="parse error", rotation=0)
-                    for i in range(1, n_pages + 1)]
+            # Response bị cắt cụt → cứu các object hoàn chỉnh trước khi bỏ cuộc.
+            parsed = _salvage_json_objects(text)
+            if not parsed:
+                # Fallback cuối: trả khong_thuoc cho tất cả trang
+                return [PageLabel(page=i, category="khong_thuoc", subtype="",
+                                  confidence=0.0, evidence="parse error", rotation=0)
+                        for i in range(1, n_pages + 1)]
 
         # Có thể là {"pages": [...]} hoặc {"results": [...]} hoặc trực tiếp [...]
         if isinstance(parsed, dict):
@@ -370,6 +446,55 @@ class OpenAIClassifier:
             ))
         labels.sort(key=lambda x: x.page)
         return labels
+
+
+# ============================================================
+# QwenClassifier — Qwen-VL qua DashScope (API tương thích OpenAI)
+# Render mỗi trang thành ảnh (như OpenAI) rồi gửi. Mạnh về OCR chữ Á Đông.
+# ============================================================
+class QwenClassifier(OpenAIClassifier):
+    """Qwen-VL (Alibaba DashScope). Dùng chung luồng render-ảnh của OpenAIClassifier,
+    chỉ khác endpoint (base_url) và tên biến môi trường key."""
+
+    DEFAULT_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+    def __init__(self, model: str, categories: list[dict],
+                 api_key: str | None = None, api_keys: list[str] | None = None,
+                 dpi: int = 150, rules: list[str] | None = None,
+                 base_url: str | None = None):
+        super().__init__(
+            model=model, categories=categories, api_key=api_key, api_keys=api_keys,
+            dpi=dpi, rules=rules, base_url=base_url or self.DEFAULT_BASE_URL,
+            provider_name="qwen", env_key="DASHSCOPE_API_KEY")
+
+
+# ============================================================
+# ChainClassifier — thử lần lượt nhiều model/vendor (tự fallback chéo)
+# ============================================================
+class ChainClassifier:
+    """Thử các classifier theo THỨ TỰ; lỗi ở cái này → chuyển sang cái kế.
+
+    Dùng để nối nhiều model/nhà cung cấp theo chế độ (vd Gemini 3.5 → Qwen 3.7-plus).
+    Mỗi classifier con đã tự xoay vòng key của nó; ChainClassifier lo fallback GIỮA
+    các model/vendor.
+    """
+
+    def __init__(self, classifiers: list, labels: list[str] | None = None):
+        self.classifiers = classifiers
+        self.labels = labels or [getattr(c, "model", "?") for c in classifiers]
+
+    def classify(self, pdf_path: str) -> ClassifyResult:
+        import logging
+        last_error = None
+        for i, clf in enumerate(self.classifiers):
+            try:
+                return clf.classify(pdf_path)
+            except Exception as e:
+                last_error = e
+                logging.getLogger("hoso").warning(
+                    "Model '%s' lỗi (%s) — chuyển sang model kế tiếp...",
+                    self.labels[i], str(e)[:140])
+        raise last_error if last_error else RuntimeError("Không có model nào để chạy")
 
 
 # ============================================================
@@ -436,7 +561,78 @@ class FallbackClassifier:
 # ============================================================
 # Factory
 # ============================================================
+def _provider_of_model(model: str) -> str:
+    """Suy nhà cung cấp từ tiền tố model: qwen* -> qwen · gpt/o* -> openai · còn lại -> gemini."""
+    m = (model or "").lower()
+    if m.startswith("qwen"):
+        return "qwen"
+    if m.startswith(("gpt", "o1", "o3", "o4", "openai")):
+        return "openai"
+    return "gemini"
+
+
+def _make_one_classifier(model: str, keys: list[str], config: dict) -> Classifier:
+    """Tạo 1 classifier cho 1 model (vendor suy ra từ tiền tố model)."""
+    m = model.lower()
+    cats, rules = config["categories"], config.get("rules")
+    if m.startswith("qwen"):
+        return QwenClassifier(model=model, categories=cats, api_keys=keys,
+                              dpi=int(config.get("render_dpi", 150)), rules=rules,
+                              base_url=config.get("qwen_base_url"))
+    if m.startswith(("gpt", "o1", "o3", "o4", "openai")):
+        return OpenAIClassifier(model=model, categories=cats, api_keys=keys,
+                                dpi=int(config.get("render_dpi", 150)), rules=rules)
+    # mặc định: Gemini (gemini-*)
+    return GeminiClassifier(model=model, categories=cats, api_keys=keys,
+                            media_resolution=config.get("media_resolution", "medium"), rules=rules)
+
+
+def _make_classifier_from_specs(config: dict, key_specs: list[dict]) -> Classifier:
+    """Dựng chuỗi classifier từ danh sách key (mỗi key gắn 1 NHÀ CUNG CẤP) + CHẾ ĐỘ.
+
+    Key chỉ gắn provider (google/qwen/openai) vì cùng 1 key dùng được mọi model của
+    nhà đó. CHẾ ĐỘ ('nhanh'/'chậm') quy định danh sách MODEL theo thứ tự; với mỗi
+    model, lấy key của provider tương ứng để tạo classifier, rồi nối ChainClassifier
+    (tự fallback chéo model/vendor; trong 1 provider thì xoay vòng nhiều key).
+    """
+    import logging
+    log = logging.getLogger("hoso")
+    by_provider: dict[str, list[str]] = {}
+    for s in key_specs:
+        prov = (s.get("provider") or "").strip().lower()
+        key = (s.get("key") or "").strip()
+        if not prov and s.get("model"):          # tương thích spec cũ {model,key}
+            prov = _provider_of_model(s["model"])
+        if prov and key:
+            by_provider.setdefault(prov, []).append(key)
+    if not by_provider:
+        raise RuntimeError("Chưa có API key nào. Vào Cài đặt → nhập key và chọn nhà cung cấp.")
+
+    mode = (config.get("mode") or config.get("default_mode") or "").lower()
+    mode_models = config.get("modes", {}).get(mode, []) or [config.get("model", "gemini-2.5-flash")]
+
+    chain, labels = [], []
+    for model in mode_models:
+        keys = by_provider.get(_provider_of_model(model))
+        if keys:
+            chain.append(_make_one_classifier(model, keys, config))
+            labels.append(model)
+    if not chain:
+        need = ", ".join(sorted({_provider_of_model(m) for m in mode_models}))
+        raise RuntimeError(
+            f"Chế độ '{mode}' cần API key của nhà cung cấp: {need} — chưa có key nào khớp.")
+    if len(chain) == 1:
+        return chain[0]
+    log.info("Chế độ '%s' → thử lần lượt: %s", mode or "(mặc định)", " → ".join(labels))
+    return ChainClassifier(chain, labels=labels)
+
+
 def make_classifier(config: dict) -> Classifier:
+    # Luồng MỚI: key_specs (mỗi key gắn 1 model) + mode. Ưu tiên nếu có.
+    if config.get("key_specs"):
+        return _make_classifier_from_specs(config, config["key_specs"])
+
+    # ---- Tương thích ngược: provider/model + api_keys ----
     provider = config.get("provider", "gemini").lower()
     fallback_cfg = config.get("fallback", {})
 
