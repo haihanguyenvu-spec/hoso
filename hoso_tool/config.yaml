@@ -21,6 +21,12 @@ default_mode: "cham"          # nhanh | cham  (mặc định: chậm)
 modes:
   nhanh: ["gemini-3.5-flash", "qwen3.7-plus"]   # nhanh: Google 3.5 + Qwen 3.7-plus
   cham:  ["qwen3.6-flash"]                        # chậm: Qwen 3.6-flash
+# Model mặc định của mỗi nhà cung cấp — dùng làm FALLBACK khi provider có key nhưng
+# không nằm trong chế độ (vd chế độ Chậm cần Qwen nhưng chỉ có key Gemini → vẫn chạy Gemini).
+provider_default_model:
+  gemini: "gemini-2.5-flash"
+  qwen:   "qwen3.6-flash"
+  openai: "gpt-4o-mini"
 # Danh sách model cho ô chọn khi nhập TỪNG API key trên UI.
 key_model_options: ["gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.0-flash", "qwen3.7-plus", "qwen3.6-flash"]
 # Endpoint Qwen (DashScope, tương thích OpenAI). Bản quốc tế: dashscope-intl; TQ đại lục: bỏ '-intl'.

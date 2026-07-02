@@ -571,6 +571,17 @@ def _provider_of_model(model: str) -> str:
     return "gemini"
 
 
+def _default_model_for_provider(provider: str, config: dict) -> str:
+    """Model mặc định của 1 nhà cung cấp — dùng khi provider có key nhưng không nằm
+    trong chế độ (làm fallback). Lấy từ config['provider_default_model'] nếu có."""
+    dm = config.get("provider_default_model", {}) or {}
+    if provider in dm:
+        return dm[provider]
+    return {"gemini": config.get("model", "gemini-2.5-flash"),
+            "qwen": "qwen3.6-flash",
+            "openai": "gpt-4o-mini"}.get(provider, config.get("model", "gemini-2.5-flash"))
+
+
 def _make_one_classifier(model: str, keys: list[str], config: dict) -> Classifier:
     """Tạo 1 classifier cho 1 model (vendor suy ra từ tiền tố model)."""
     m = model.lower()
@@ -611,16 +622,27 @@ def _make_classifier_from_specs(config: dict, key_specs: list[dict]) -> Classifi
     mode = (config.get("mode") or config.get("default_mode") or "").lower()
     mode_models = config.get("modes", {}).get(mode, []) or [config.get("model", "gemini-2.5-flash")]
 
-    chain, labels = [], []
+    chain, labels, used = [], [], set()
+    # 1) Ưu tiên các model của CHẾ ĐỘ (nếu có key của provider tương ứng).
     for model in mode_models:
-        keys = by_provider.get(_provider_of_model(model))
+        prov = _provider_of_model(model)
+        keys = by_provider.get(prov)
         if keys:
             chain.append(_make_one_classifier(model, keys, config))
             labels.append(model)
+            used.add(prov)
+    # 2) FALLBACK: provider nào CÓ KEY mà chưa dùng → thêm model mặc định của provider đó.
+    #    (vd chế độ Chậm cần Qwen nhưng chỉ có key Gemini → vẫn chạy bằng Gemini.)
+    for prov, keys in by_provider.items():
+        if prov in used:
+            continue
+        model = _default_model_for_provider(prov, config)
+        chain.append(_make_one_classifier(model, keys, config))
+        labels.append(model)
+        used.add(prov)
+
     if not chain:
-        need = ", ".join(sorted({_provider_of_model(m) for m in mode_models}))
-        raise RuntimeError(
-            f"Chế độ '{mode}' cần API key của nhà cung cấp: {need} — chưa có key nào khớp.")
+        raise RuntimeError("Chưa có API key nào. Vào Cài đặt → nhập key và chọn nhà cung cấp.")
     if len(chain) == 1:
         return chain[0]
     log.info("Chế độ '%s' → thử lần lượt: %s", mode or "(mặc định)", " → ".join(labels))

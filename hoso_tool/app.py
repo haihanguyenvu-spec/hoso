@@ -522,13 +522,13 @@ with tab1:
         out_subdir = cfg.get("output_subdir", "output")
         key_specs_active = [{"provider": s.get("provider", DEFAULT_PROVIDER), "key": s["key"].strip()}
                             for s in st.session_state.key_specs if s.get("key", "").strip()]
-        # Cảnh báo nếu chế độ cần nhà cung cấp mà chưa có key
+        # Nếu chế độ ưu tiên nhà cung cấp chưa có key → vẫn chạy bằng key sẵn có (fallback), chỉ báo nhẹ.
         _need = {_provider_of_model(m) for m in cfg.get("modes", {}).get(cfg.get("mode", ""), [])}
         _have = {s["provider"] for s in key_specs_active}
         if key_specs_active and _need and not (_have & _need):
             _lbl = ", ".join(PROVIDER_LABELS.get(p, p) for p in _need)
-            st.warning(f"⚠️ Chế độ **{cfg.get('mode')}** cần key của: **{_lbl}** nhưng chưa có. "
-                       "Vào ⚙️ Cài đặt để thêm key đúng nhà cung cấp.")
+            st.info(f"ℹ️ Chế độ **{cfg.get('mode')}** ưu tiên **{_lbl}** (chưa có key) → "
+                    "sẽ chạy bằng key hiện có làm dự phòng. Thêm key ở ⚙️ Cài đặt nếu muốn dùng đúng model.")
         btn_disabled = not (pick and key_specs_active)
         if st.button("▶ Phân loại & Tạo 6 file PDF", type="primary", disabled=btn_disabled):
             st.toast("⏳ Đang khởi tạo bộ xử lý...", icon="🚀")
