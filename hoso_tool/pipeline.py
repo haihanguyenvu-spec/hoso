@@ -15,7 +15,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Callable
 
-from assemble import PdfAssembler, page_count
+from assemble import PdfAssembler, build_upright_pdf, page_count
 from classify import ClassifyResult
 
 log = logging.getLogger("hoso")
@@ -100,7 +100,23 @@ def classify_folder(folder: str, config: dict,
     usage = {"prompt_tokens": 0, "output_tokens": 0, "total_tokens": 0,
              "n_calls": 0, "model": config.get("model", "")}
     for fi, pdf in enumerate(pdfs):
-        result = classify(pdf)
+        # Xoay các trang về ĐÚNG CHIỀU trước khi gửi model: trang lộn ngược khiến
+        # model đọc sai → gán nhãn bừa. Góc phát hiện (OCR) lưu luôn vào index để
+        # bước ghép dùng lại (không phải dò lại).
+        upright_pdf, rotations = build_upright_pdf(pdf)
+        try:
+            result = classify(upright_pdf)
+        finally:
+            if upright_pdf != pdf:
+                try:
+                    os.remove(upright_pdf)
+                except Exception:
+                    pass
+        if rotations:
+            n_rot = sum(1 for r in rotations.values() if r)
+            if n_rot:
+                log.info("%s: xoay đúng chiều %d/%d trang trước khi phân loại",
+                         os.path.basename(pdf), n_rot, len(rotations))
         try:
             n_pages = page_count(pdf)
         except Exception:
@@ -112,10 +128,12 @@ def classify_folder(folder: str, config: dict,
                 os.path.basename(pdf), n_pages if n_pages is not None else "?",
                 len(result.labels), out_of_range, dup)
         for lb in labels:
+            # Ưu tiên góc xoay OCR (đã áp cho model); nếu không có thì theo model.
+            rot = rotations.get(lb.page, getattr(lb, "rotation", 0))
             entries.append(dict(file_index=fi, file=os.path.basename(pdf), page=lb.page,
                                 category=lb.category, subtype=lb.subtype,
                                 confidence=lb.confidence, evidence=lb.evidence,
-                                rotation=getattr(lb, "rotation", 0)))
+                                rotation=rot))
         usage["prompt_tokens"] += result.prompt_tokens
         usage["output_tokens"] += result.output_tokens
         usage["total_tokens"] += result.total_tokens

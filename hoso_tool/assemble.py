@@ -149,6 +149,71 @@ def detect_page_rotation(page_pdf: str) -> int:
         return 0
 
 
+def build_upright_pdf(src_pdf: str) -> tuple[str, dict[int, int]]:
+    """Tạo bản PDF đã XOAY các trang về đúng chiều, để GỬI MODEL PHÂN LOẠI.
+
+    Vì model (Gemini) đọc trang lộn ngược rất kém → gán nhãn sai; xoay đứng
+    trước khi gửi giúp phân loại chính xác hơn hẳn.
+
+    Trả về (đường_dẫn_pdf, {page_no: góc_đã_phát_hiện}). Góc này (OCR) cũng dùng
+    lại cho bước ghép (lưu vào index) nên KHÔNG phải dò lại. Nếu không trang nào
+    cần xoay (hoặc thiếu tesseract) → trả (src_pdf, {...} hoặc {}), giữ nguyên bản gốc.
+    Caller nên xóa file trả về nếu nó KHÁC src_pdf.
+    """
+    if not _ensure_tesseract():
+        return src_pdf, {}
+    tmpdir = tempfile.mkdtemp(prefix="hoso_up_", dir=get_safe_temp_dir())
+    try:
+        pattern = os.path.join(tmpdir, "p-%d.pdf")
+        with safe_input_path(src_pdf) as safe:
+            subprocess.run(["pdfseparate", safe, pattern], check=True,
+                           capture_output=True, encoding="utf-8", errors="ignore")
+        pages: dict[int, str] = {}
+        for fn in os.listdir(tmpdir):
+            m = re.match(r"p-(\d+)\.pdf$", fn)
+            if m:
+                pages[int(m.group(1))] = os.path.join(tmpdir, fn)
+        if not pages:
+            return src_pdf, {}
+
+        from pypdf import PdfReader, PdfWriter
+        rotations: dict[int, int] = {}
+        rebuilt: list[str] = []
+        any_rot = False
+        for i in sorted(pages):
+            pf = pages[i]
+            rot = detect_page_rotation(pf)
+            rotations[i] = rot
+            if rot:
+                any_rot = True
+                reader = PdfReader(pf)
+                writer = PdfWriter()
+                page = reader.pages[0]
+                page.rotate(rot)
+                writer.add_page(page)
+                outp = os.path.join(tmpdir, f"r-{i}.pdf")
+                with open(outp, "wb") as f:
+                    writer.write(f)
+                rebuilt.append(outp)
+            else:
+                rebuilt.append(pf)
+
+        if not any_rot:
+            return src_pdf, rotations  # đã đứng hết → dùng bản gốc, khỏi ghép lại
+
+        fd, out_pdf = tempfile.mkstemp(suffix=".pdf", dir=get_safe_temp_dir())
+        os.close(fd)
+        subprocess.run(["pdfunite", *rebuilt, out_pdf], check=True,
+                       capture_output=True, encoding="utf-8", errors="ignore")
+        return out_pdf, rotations
+    except Exception as e:
+        logger.warning("Không tạo được bản PDF xoay đứng cho %s (%s) — gửi bản gốc.",
+                       os.path.basename(src_pdf), e)
+        return src_pdf, {}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def get_safe_temp_dir() -> str:
     t = tempfile.gettempdir()
     if os.name == "nt" and any(ord(c) > 127 for c in t):
@@ -233,18 +298,8 @@ class PdfAssembler:
             sep = self._separate(src_pdf)
             if page_no in sep:
                 page_file = sep[page_no]
-                # Fallback: khi Gemini KHÔNG báo góc xoay (rotation == 0), tự phát
-                # hiện trang bị lệch bằng OCR-2-chiều (0/180) + OSD (90/270).
-                # Không đụng tới góc Gemini đã báo (>0): thực nghiệm cho thấy Gemini
-                # đáng tin hơn trên đúng nhóm trang khó (bản vẽ/con dấu).
-                if rotation == 0:
-                    det = detect_page_rotation(page_file)
-                    if det != 0:
-                        rotation = det
-                        logger.info(
-                            "Tự phát hiện trang %d của %s bị xoay — tự sửa: xoay %d độ",
-                            page_no, os.path.basename(src_pdf), det)
-
+                # Góc xoay đã được phát hiện (OCR) và lưu vào index ở bước phân loại
+                # (build_upright_pdf) → chỉ cần áp dụng, KHÔNG dò lại (tránh OCR 2 lần).
                 if rotation != 0:
                     try:
                         from pypdf import PdfReader, PdfWriter
