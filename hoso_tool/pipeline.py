@@ -10,12 +10,43 @@ from __future__ import annotations
 import csv
 import glob
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Callable
 
 from assemble import PdfAssembler, page_count
 from classify import ClassifyResult
+
+log = logging.getLogger("hoso")
+
+
+def _sanitize_labels(labels: list, n_pages: int | None):
+    """Lọc nhãn model trả về cho MỘT file: bỏ trang ngoài phạm vi + khử trùng lặp.
+
+    Model (nhất là với PDF scan dài) đôi khi 'ảo giác' số trang: trả nhãn cho
+    trang vượt quá số trang thật, hoặc lặp cùng một trang. Giữ lại đúng 1 nhãn
+    cho mỗi trang trong [1, n_pages] — chọn nhãn có confidence cao nhất.
+
+    Trả về (labels_sạch, n_bỏ_ngoài_phạm_vi, n_bỏ_trùng).
+    """
+    best: dict[int, object] = {}
+    out_of_range = 0
+    dup = 0
+    for lb in labels:
+        pg = int(getattr(lb, "page", 0))
+        if pg < 1 or (n_pages is not None and pg > n_pages):
+            out_of_range += 1
+            continue
+        cur = best.get(pg)
+        if cur is None:
+            best[pg] = lb
+        else:
+            dup += 1
+            if float(getattr(lb, "confidence", 0)) > float(getattr(cur, "confidence", 0)):
+                best[pg] = lb
+    cleaned = [best[p] for p in sorted(best)]
+    return cleaned, out_of_range, dup
 
 INDEX_NAME = "_index.csv"
 USAGE_NAME = "_usage.json"
@@ -70,7 +101,17 @@ def classify_folder(folder: str, config: dict,
              "n_calls": 0, "model": config.get("model", "")}
     for fi, pdf in enumerate(pdfs):
         result = classify(pdf)
-        for lb in result.labels:
+        try:
+            n_pages = page_count(pdf)
+        except Exception:
+            n_pages = None
+        labels, out_of_range, dup = _sanitize_labels(result.labels, n_pages)
+        if out_of_range or dup:
+            log.warning(
+                "%s: PDF có %s trang nhưng model trả %d nhãn — bỏ %d nhãn ngoài phạm vi, %d nhãn trùng trang",
+                os.path.basename(pdf), n_pages if n_pages is not None else "?",
+                len(result.labels), out_of_range, dup)
+        for lb in labels:
             entries.append(dict(file_index=fi, file=os.path.basename(pdf), page=lb.page,
                                 category=lb.category, subtype=lb.subtype,
                                 confidence=lb.confidence, evidence=lb.evidence,

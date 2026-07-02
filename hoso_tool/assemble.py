@@ -15,11 +15,18 @@ import tempfile
 
 logger = logging.getLogger("hoso")
 
-# Ngưỡng tin cậy tối thiểu của Tesseract OSD để CHẤP NHẬN tự động xoay.
-# Thực nghiệm trên hồ sơ scan: phát hiện đúng thường có confidence > 12,
-# còn nhiễu (trang bản vẽ, con dấu, chữ thưa) thường < 9. Đặt mặc định 8 để
-# lọc nhiễu nhưng vẫn bắt được trang lệch thật. Có thể chỉnh qua biến môi trường.
+# Ngưỡng tin cậy tối thiểu của Tesseract OSD — CHỈ dùng cho phát hiện trang
+# xoay NGANG (90/270). Với 0 vs 180 ta dùng phương pháp đếm chữ OCR (bên dưới)
+# vì OSD hay cho confidence thấp trên trang bảng/phụ lục → bỏ sót trang ngược.
 OSD_MIN_CONFIDENCE = float(os.environ.get("HOSO_OSD_MIN_CONFIDENCE", "8"))
+
+# Tham số phát hiện xoay 0/180 bằng OCR (đếm số từ đọc được ở mỗi chiều).
+# Chiều nào ra nhiều chữ hơn rõ rệt là chiều đúng — ổn định cả trên trang chữ
+# thưa (bảng vật liệu, phụ lục) nơi Tesseract OSD không đáng tin.
+ORIENT_DPI = int(os.environ.get("HOSO_ORIENT_DPI", "120"))
+ORIENT_MIN_WORDS = int(os.environ.get("HOSO_ORIENT_MIN_WORDS", "10"))
+ORIENT_MARGIN = float(os.environ.get("HOSO_ORIENT_MARGIN", "1.3"))
+ORIENT_MIN_DIFF = int(os.environ.get("HOSO_ORIENT_MIN_DIFF", "6"))
 
 
 @functools.lru_cache(maxsize=1)
@@ -60,38 +67,86 @@ def _ensure_tesseract() -> bool:
     return True
 
 
-def detect_rotation_osd(page_pdf: str) -> tuple[int, float]:
-    """Dùng Tesseract OSD đoán góc cần xoay để chữ nằm thẳng cho MỘT trang PDF.
+def _render_gray(page_pdf: str, dpi: int):
+    """Render trang 1 của PDF thành ảnh xám PIL (tôn trọng /Rotate). None nếu lỗi."""
+    import glob
+    from PIL import Image
+    with tempfile.TemporaryDirectory(dir=get_safe_temp_dir()) as d:
+        root = os.path.join(d, "pg")
+        subprocess.run(
+            ["pdftoppm", "-gray", "-png", "-r", str(dpi), page_pdf, root],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        pngs = glob.glob(root + "*.png")
+        if not pngs:
+            return None
+        return Image.open(pngs[0]).copy()
 
-    Render trang thành ảnh (tôn trọng /Rotate sẵn có) rồi chạy OSD.
-    Trả về (góc_xoay, độ_tin_cậy). (0, 0.0) nếu OSD không sẵn sàng hoặc không
-    xác định được (trang trắng, quá ít chữ, lỗi...).
+
+def _readable_word_count(img) -> int:
+    """Số 'từ' Tesseract đọc được với confidence khá (>40) và dài >=3 ký tự.
+
+    Là thước đo mức 'đọc được' của ảnh theo chiều hiện tại — ảnh đúng chiều sẽ
+    cho nhiều từ hơn hẳn ảnh bị xoay ngược.
+    """
+    import pytesseract
+    d = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+    n = 0
+    for t, c in zip(d["text"], d["conf"]):
+        try:
+            conf = float(c)
+        except (TypeError, ValueError):
+            continue
+        if conf > 40 and len(t.strip()) >= 3:
+            n += 1
+    return n
+
+
+def _osd_rotation(img) -> tuple[int, float]:
+    """(góc, độ_tin_cậy) từ Tesseract OSD. (0, 0.0) nếu lỗi/không xác định."""
+    import pytesseract
+    try:
+        osd = pytesseract.image_to_osd(img)
+    except Exception:
+        return 0, 0.0
+    rot_m = re.search(r"Rotate:\s*(\d+)", osd)
+    conf_m = re.search(r"Orientation confidence:\s*([\d.]+)", osd)
+    return (int(rot_m.group(1)) % 360 if rot_m else 0,
+            float(conf_m.group(1)) if conf_m else 0.0)
+
+
+def detect_page_rotation(page_pdf: str) -> int:
+    """Đoán góc cần xoay (theo chiều kim đồng hồ) để trang nằm thẳng. 0 nếu đã thẳng.
+
+    Chiến lược:
+      1) 0 vs 180 — SO SÁNH SỐ CHỮ ĐỌC ĐƯỢC ở hai chiều (OCR). Chiều 180 thắng
+         rõ rệt thì trang bị lộn ngược → trả 180. Cách này ổn định cả trên trang
+         bảng/phụ lục chữ thưa (nơi OSD confidence thấp nên trước đây bỏ sót).
+      2) Nếu quá ít chữ theo chiều ngang (trang xoay NGANG, hoặc trắng/ảnh) →
+         nhờ Tesseract OSD; chỉ nhận 90/270 khi đủ tin cậy.
+    Trả 0 khi OSD/OCR không sẵn sàng hoặc không xác định được (an toàn: không xoay).
     """
     if not _ensure_tesseract():
-        return 0, 0.0
+        return 0
     try:
-        import glob
-        import pytesseract
-        from PIL import Image
-        with tempfile.TemporaryDirectory(dir=get_safe_temp_dir()) as ocr_tmp:
-            img_p = os.path.join(ocr_tmp, "ocr_page")
-            subprocess.run(
-                ["pdftoppm", "-png", "-r", "150", page_pdf, img_p],
-                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            pngs = glob.glob(img_p + "*.png")
-            if not pngs:
-                return 0, 0.0
-            osd = pytesseract.image_to_osd(Image.open(pngs[0]))
-        rot_m = re.search(r"Rotate:\s*(\d+)", osd)
-        conf_m = re.search(r"Orientation confidence:\s*([\d.]+)", osd)
-        rot = int(rot_m.group(1)) % 360 if rot_m else 0
-        conf = float(conf_m.group(1)) if conf_m else 0.0
-        return rot, conf
+        img = _render_gray(page_pdf, ORIENT_DPI)
+        if img is None:
+            return 0
+        w0 = _readable_word_count(img)
+        w180 = _readable_word_count(img.rotate(180, expand=True))
+        if (w180 >= ORIENT_MIN_WORDS and w180 >= w0 * ORIENT_MARGIN
+                and (w180 - w0) >= ORIENT_MIN_DIFF):
+            return 180
+        if w0 >= ORIENT_MIN_WORDS:
+            return 0  # đủ chữ theo chiều đứng và không thua chiều 180 → đã thẳng
+        # Ít chữ ngang: có thể trang xoay 90/270, hoặc trắng/ảnh → để OSD quyết.
+        osd_rot, osd_conf = _osd_rotation(img)
+        if osd_rot in (90, 270) and osd_conf >= OSD_MIN_CONFIDENCE:
+            return osd_rot
+        return 0
     except Exception as e:
-        # Trang quá ít chữ hay lỗi nhận diện: coi như không xác định được.
-        logger.debug("OSD không xử lý được %s: %s", os.path.basename(page_pdf), e)
-        return 0, 0.0
+        logger.debug("Phát hiện xoay không xử lý được %s: %s",
+                     os.path.basename(page_pdf), e)
+        return 0
 
 
 def get_safe_temp_dir() -> str:
@@ -178,22 +233,17 @@ class PdfAssembler:
             sep = self._separate(src_pdf)
             if page_no in sep:
                 page_file = sep[page_no]
-                # Fallback: khi Gemini KHÔNG báo góc xoay (rotation == 0), tự dùng
-                # Tesseract OSD để phát hiện trang bị lệch. CHỈ ghi đè khi độ tin cậy
-                # đủ cao — tránh nhiễu trên trang bản vẽ/con dấu làm hỏng trang vốn
-                # đã thẳng. Không đụng tới góc Gemini đã báo (>0): thực nghiệm cho
-                # thấy Gemini đáng tin hơn OSD trên đúng nhóm trang khó này.
+                # Fallback: khi Gemini KHÔNG báo góc xoay (rotation == 0), tự phát
+                # hiện trang bị lệch bằng OCR-2-chiều (0/180) + OSD (90/270).
+                # Không đụng tới góc Gemini đã báo (>0): thực nghiệm cho thấy Gemini
+                # đáng tin hơn trên đúng nhóm trang khó (bản vẽ/con dấu).
                 if rotation == 0:
-                    osd_rot, osd_conf = detect_rotation_osd(page_file)
-                    if osd_rot != 0 and osd_conf >= OSD_MIN_CONFIDENCE:
-                        rotation = osd_rot
+                    det = detect_page_rotation(page_file)
+                    if det != 0:
+                        rotation = det
                         logger.info(
-                            "OSD phát hiện trang %d của %s bị xoay (conf %.1f) — tự sửa: xoay %d độ",
-                            page_no, os.path.basename(src_pdf), osd_conf, osd_rot)
-                    elif osd_rot != 0:
-                        logger.debug(
-                            "OSD nghi trang %d của %s xoay %d nhưng conf %.1f < %.1f — bỏ qua",
-                            page_no, os.path.basename(src_pdf), osd_rot, osd_conf, OSD_MIN_CONFIDENCE)
+                            "Tự phát hiện trang %d của %s bị xoay — tự sửa: xoay %d độ",
+                            page_no, os.path.basename(src_pdf), det)
 
                 if rotation != 0:
                     try:
