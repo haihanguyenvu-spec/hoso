@@ -114,8 +114,14 @@ def _osd_rotation(img) -> tuple[int, float]:
             float(conf_m.group(1)) if conf_m else 0.0)
 
 
-def detect_page_rotation(page_pdf: str) -> int:
-    """Đoán góc cần xoay (theo chiều kim đồng hồ) để trang nằm thẳng. 0 nếu đã thẳng.
+def detect_page_rotation(page_pdf: str) -> int | None:
+    """Đoán góc cần xoay (theo chiều kim đồng hồ) để trang nằm thẳng.
+
+    Trả về:
+      - 0       : chắc chắn trang đã thẳng (OCR đọc được đủ chữ).
+      - 90/180/270 : góc cần xoay để trang nằm thẳng.
+      - None    : KHÔNG XÁC ĐỊNH ĐƯỢC (quá ít chữ, lỗi, hoặc thiếu tesseract).
+                  Caller nên fallback sang nguồn khác (VD: model vision).
 
     Chiến lược:
       1) 0 vs 180 — SO SÁNH SỐ CHỮ ĐỌC ĐƯỢC ở hai chiều (OCR). Chiều 180 thắng
@@ -123,14 +129,14 @@ def detect_page_rotation(page_pdf: str) -> int:
          bảng/phụ lục chữ thưa (nơi OSD confidence thấp nên trước đây bỏ sót).
       2) Nếu quá ít chữ theo chiều ngang (trang xoay NGANG, hoặc trắng/ảnh) →
          nhờ Tesseract OSD; chỉ nhận 90/270 khi đủ tin cậy.
-    Trả 0 khi OSD/OCR không sẵn sàng hoặc không xác định được (an toàn: không xoay).
+      3) Trả None khi không đủ dữ liệu để quyết định.
     """
     if not _ensure_tesseract():
-        return 0
+        return None
     try:
         img = _render_gray(page_pdf, ORIENT_DPI)
         if img is None:
-            return 0
+            return None
         w0 = _readable_word_count(img)
         w180 = _readable_word_count(img.rotate(180, expand=True))
         if (w180 >= ORIENT_MIN_WORDS and w180 >= w0 * ORIENT_MARGIN
@@ -142,11 +148,11 @@ def detect_page_rotation(page_pdf: str) -> int:
         osd_rot, osd_conf = _osd_rotation(img)
         if osd_rot in (90, 270) and osd_conf >= OSD_MIN_CONFIDENCE:
             return osd_rot
-        return 0
+        return None  # không đủ dữ liệu → để caller fallback
     except Exception as e:
         logger.debug("Phát hiện xoay không xử lý được %s: %s",
                      os.path.basename(page_pdf), e)
-        return 0
+        return None
 
 
 def build_upright_pdf(src_pdf: str) -> tuple[str, dict[int, int]]:
@@ -183,7 +189,8 @@ def build_upright_pdf(src_pdf: str) -> tuple[str, dict[int, int]]:
         for i in sorted(pages):
             pf = pages[i]
             rot = detect_page_rotation(pf)
-            rotations[i] = rot
+            if rot is not None:
+                rotations[i] = rot
             if rot:
                 any_rot = True
                 reader = PdfReader(pf)
