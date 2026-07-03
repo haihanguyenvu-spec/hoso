@@ -275,7 +275,7 @@ def render_doc_types_editor(cfg: dict):
                   pd.DataFrame({"Tên nhóm con / mô tả": pd.Series(dtype=str),
                                 "Từ khóa nhận diện (cách nhau bởi dấu phẩy)": pd.Series(dtype=str)}))
             edited = st.data_editor(
-                df, num_rows="dynamic", use_container_width=True, hide_index=True,
+                df, num_rows="dynamic", width="stretch", hide_index=True,
                 key=f"subs_{uid}",
                 column_config={
                     "Tên nhóm con / mô tả": st.column_config.TextColumn(width="medium"),
@@ -297,7 +297,7 @@ def render_doc_types_editor(cfg: dict):
 
     st.markdown("")
     a1, a2, a3 = st.columns(3)
-    if a1.button("➕ Thêm loại chứng từ", use_container_width=True):
+    if a1.button("➕ Thêm loại chứng từ", width="stretch"):
         cats.append({"name": "", "required": False, "subtypes": [], "_uid": uuid.uuid4().hex[:8]})
         st.rerun()
 
@@ -308,7 +308,7 @@ def render_doc_types_editor(cfg: dict):
                            height=180, key="rules_txt", label_visibility="collapsed")
         st.session_state["rules_edit"] = [ln.strip() for ln in txt.splitlines() if ln.strip()]
 
-    if a2.button("💾 Lưu cấu hình", type="primary", use_container_width=True):
+    if a2.button("💾 Lưu cấu hình", type="primary", width="stretch"):
         clean, used = [], set()
         for cat in cats:
             name = (cat.get("name") or "").strip()
@@ -332,7 +332,7 @@ def render_doc_types_editor(cfg: dict):
             st.success(f"✅ Đã lưu {len(clean)} loại chứng từ. Áp dụng cho các lần phân loại sau.")
             st.rerun()
 
-    if a3.button("↺ Khôi phục mặc định", use_container_width=True,
+    if a3.button("↺ Khôi phục mặc định", width="stretch",
                  help="Xóa cấu hình đã lưu, quay về mặc định gốc của tool."):
         reset_doc_types()
         load_config.clear()
@@ -379,12 +379,12 @@ def render_api_keys_editor(cfg: dict):
         st.rerun()
 
     a1, a2 = st.columns(2)
-    if a1.button("➕ Thêm key", use_container_width=True):
+    if a1.button("➕ Thêm key", width="stretch"):
         last_prov = (st.session_state.key_specs[-1].get("provider")
                      if st.session_state.key_specs else DEFAULT_PROVIDER)
         st.session_state.key_specs.append({"provider": last_prov or DEFAULT_PROVIDER, "key": ""})
         st.rerun()
-    if a2.button("💾 Lưu API keys", use_container_width=True, type="primary"):
+    if a2.button("💾 Lưu API keys", width="stretch", type="primary"):
         st.session_state.key_specs = ([s for s in st.session_state.key_specs if s.get("key")]
                                       or [{"provider": DEFAULT_PROVIDER, "key": ""}])
         save_key_specs(st.session_state.key_specs)
@@ -446,7 +446,7 @@ with st.sidebar:
     _ov = read_doc_types_override() is not None
     st.caption(f"🔑 {_n_keys} key · 📄 danh mục: {'tùy chỉnh' if _ov else 'mặc định'}")
     if st.button(("✖️ Đóng cài đặt" if st.session_state.settings_open else "⚙️ Cài đặt"),
-                 use_container_width=True):
+                 width="stretch"):
         st.session_state.settings_open = not st.session_state.settings_open
         st.rerun()
 
@@ -501,7 +501,7 @@ with tab1:
     else:
         rows = [{"Folder": os.path.basename(f), "Số PDF": len(pipeline.list_pdfs(f, cfg["output_subdir"])),
                  "Trạng thái": folder_status(f, cfg)} for f in folders]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
         todo = [f for f in folders if "chưa chạy" in folder_status(f, cfg)]
         done_folders = [f for f in folders if "đã ghép" in folder_status(f, cfg)]
@@ -673,7 +673,7 @@ with tab2:
                     "confidence": st.column_config.NumberColumn("Tin cậy", disabled=True, format="%d%%"),
                     "evidence": st.column_config.TextColumn("Căn cứ", disabled=True),
                 },
-                use_container_width=True, hide_index=True, height=520, key=f"editor::{folder}")
+                width="stretch", hide_index=True, height=520, key=f"editor::{folder}")
 
             # Áp nhãn đã sửa ngược lại vào entries (khớp theo file+page).
             for _, r in edited.iterrows():
@@ -692,7 +692,7 @@ with tab2:
                 pg = int(rest.split(" ", 1)[0])
                 try:
                     st.image(render_page(os.path.join(folder, fpart), pg),
-                             caption=sel, use_container_width=True)
+                             caption=sel, width="stretch")
                 except Exception as e:
                     st.warning(f"Không render được trang: {e}")
 
@@ -765,4 +765,4 @@ with tab3:
             view = view.copy()
             view["status"] = view["status"].map(STATUS_VN).fillna(view["status"])
             view = view.rename(columns=COLS_VN).fillna("")
-            st.dataframe(view, use_container_width=True, hide_index=True)
+            st.dataframe(view, width="stretch", hide_index=True)
