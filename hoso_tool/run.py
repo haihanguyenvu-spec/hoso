@@ -22,7 +22,7 @@ import time
 
 import yaml
 
-from classify import make_classifier
+from classify import _is_transient, make_classifier
 from pipeline import FolderResult, process_folder
 
 # Ước tính token/trang theo media_resolution của Gemini (ảnh scan).
@@ -70,35 +70,31 @@ def discover_folders(input_root: str, output_subdir: str) -> list[str]:
     return out
 
 
-def make_retrying_classify(classifier, max_retries: int):
+def make_retrying_classify(classifier, max_retries: int, notify=None):
+    """Bọc classifier: thử lại khi lỗi TẠM THỜI (503/quota/timeout), backoff luỹ thừa.
+
+    Lỗi KHÔNG tạm thời (sai key, lỗi mã hoá tên file, lỗi code...) ném ra NGAY.
+    Thử lại mấy loại đó chỉ tốn thêm ~30s rồi vẫn hỏng, mà làm folder đứng lâu vô ích.
+
+    `notify(text)` (tùy chọn) cho giao diện báo "đang chờ thử lại" — cố ý không
+    import streamlit ở đây để run.py vẫn chạy thuần CLI được.
+    """
     def _classify(pdf_path: str):
         delay = 3.0
-        actual_max = max(max_retries, 6)
-        for attempt in range(1, actual_max + 1):
+        name = os.path.basename(pdf_path)
+        for attempt in range(1, max_retries + 1):
             try:
                 return classifier.classify(pdf_path)
             except Exception as e:
                 err_msg = str(e)
-                is_transient = any(term in err_msg for term in ["503", "UNAVAILABLE", "high demand", "ResourceExhausted", "quota", "504", "502"])
-                
-                # If it's not a transient error, or if we have exhausted all retries
-                if attempt == actual_max or (not is_transient and attempt == max_retries):
+                if attempt >= max_retries or not _is_transient(err_msg):
                     raise
-                
-                # Jitter: add random delay to avoid request collision
-                sleep_time = delay + random.uniform(1.0, 3.0)
-                
-                # Log warning
-                log.warning("classify lỗi (%s) lần %d, thử lại sau %.1fs: %s",
-                            os.path.basename(pdf_path), attempt, sleep_time, err_msg)
-                
-                # UI Notification (toast) if run under Streamlit
-                try:
-                    import streamlit as st
-                    st.toast(f"⚠️ API bận ({os.path.basename(pdf_path)}), đang tự thử lại lần {attempt}/{actual_max} sau {sleep_time:.1f}s...")
-                except Exception:
-                    pass
-                
+                sleep_time = delay + random.uniform(1.0, 3.0)   # jitter: tránh dồn request
+                log.warning("classify lỗi (%s) lần %d/%d, thử lại sau %.1fs: %s",
+                            name, attempt, max_retries, sleep_time, err_msg[:300])
+                if notify is not None:
+                    notify(f"API bận ({name}) — thử lại lần {attempt + 1}/{max_retries} "
+                           f"sau {sleep_time:.0f}s")
                 time.sleep(sleep_time)
                 delay *= 2.0
     return _classify

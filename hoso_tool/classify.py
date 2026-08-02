@@ -10,11 +10,15 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import Protocol
+
+log = logging.getLogger("hoso")
 
 from pydantic import BaseModel
 
@@ -137,7 +141,8 @@ class GeminiClassifier:
 
     def __init__(self, model: str, categories: list[dict],
                  api_keys: list[str] | None = None, media_resolution: str = "medium",
-                 rules: list[str] | None = None):
+                 rules: list[str] | None = None, request_timeout: float = 180.0,
+                 file_wait_timeout: float = 180.0, max_keys_per_call: int = 2):
         from google import genai  # import trễ để provider khác không cần SDK này
 
         # Nếu không truyền danh sách key, tìm từ môi trường hoặc key đơn
@@ -155,37 +160,71 @@ class GeminiClassifier:
                 
         self._genai = genai
         self.api_keys = keys
-        self.clients = [genai.Client(api_key=k) for k in keys]
+        # QUAN TRỌNG: không đặt timeout thì HttpOptions.timeout = None -> httpx
+        # chờ VÔ HẠN. Một socket chết (rất hay gặp sau các đoạn OCR dài không có
+        # traffic) sẽ treo cả batch mà không ném lỗi nào, nên retry không chạy.
+        self.clients = []
+        for k in keys:
+            try:
+                self.clients.append(genai.Client(
+                    api_key=k,
+                    http_options=genai.types.HttpOptions(
+                        timeout=int(request_timeout * 1000))))   # HttpOptions tính bằng ms
+            except (TypeError, ValueError, AttributeError):
+                self.clients.append(genai.Client(api_key=k))     # SDK cũ: chịu, chạy không timeout
         self.current_idx = 0
         self.model = model
         self.media_resolution = media_resolution
+        self.file_wait_timeout = float(file_wait_timeout)
+        # Mỗi key hỏng là thêm một lượt upload + generate cho CÙNG file (có thể
+        # 20MB). Với 5 key thì một file hỏng ngốn tới 5 lượt, nhân tiếp với retry
+        # vòng ngoài -> tải API bùng nổ. Chặn ở 2 key/lần là đủ để đổi tài khoản.
+        self.max_keys_per_call = max(1, int(max_keys_per_call))
         self.prompt = build_prompt(categories, rules)
         self.valid_categories = {c["key"] for c in categories} | {"khong_thuoc"}
+
+    def _upload(self, client, pdf_path: str):
+        """Upload PDF rồi chờ Gemini xử lý xong. Có TRẦN thời gian chờ."""
+        from assemble import ascii_name_path
+
+        with ascii_name_path(pdf_path) as safe_path:
+            with open(safe_path, "rb") as f:
+                uploaded = client.files.upload(
+                    file=f, config=dict(mime_type="application/pdf"))
+
+        # Vòng chờ này trước đây không có trần: file kẹt PROCESSING = treo vĩnh viễn.
+        deadline = time.monotonic() + self.file_wait_timeout
+        while uploaded.state.name == "PROCESSING":
+            if time.monotonic() >= deadline:
+                try:
+                    client.files.delete(name=uploaded.name)
+                except Exception:
+                    pass
+                raise TimeoutError(
+                    f"Gemini xử lý file quá {self.file_wait_timeout:.0f}s "
+                    f"({os.path.basename(pdf_path)}) — bỏ qua để chạy tiếp.")
+            time.sleep(2)
+            uploaded = client.files.get(name=uploaded.name)
+        if uploaded.state.name == "FAILED":
+            try:
+                client.files.delete(name=uploaded.name)
+            except Exception:
+                pass
+            raise RuntimeError("File upload lên Gemini bị lỗi xử lý (FAILED).")
+        return uploaded
 
     def classify(self, pdf_path: str) -> ClassifyResult:
         types = self._genai.types
         n_keys = len(self.clients)
-        last_error = None
+        n_try = min(n_keys, self.max_keys_per_call)
+        last_error: Exception | None = None
 
-        for attempt in range(n_keys):
+        for attempt in range(n_try):
             idx = (self.current_idx + attempt) % n_keys
             client = self.clients[idx]
-            
+
             try:
-                with open(pdf_path, "rb") as f:
-                    uploaded = client.files.upload(
-                        file=f,
-                        config=dict(mime_type="application/pdf")
-                    )
-                
-                # Chờ file xử lý xong trên server của Gemini
-                import time
-                while uploaded.state.name == "PROCESSING":
-                    time.sleep(2)
-                    uploaded = client.files.get(name=uploaded.name)
-                if uploaded.state.name == "FAILED":
-                    client.files.delete(name=uploaded.name)
-                    raise RuntimeError("File upload lên Gemini bị lỗi xử lý (FAILED).")
+                uploaded = self._upload(client, pdf_path)
 
                 try:
                     cfg_kwargs = dict(
@@ -228,16 +267,13 @@ class GeminiClassifier:
                                       total_tokens=tt, provider_used=provider_str)
             except Exception as e:
                 last_error = e
-                if n_keys > 1:
-                    import logging
-                    logging.getLogger("hoso").warning(
-                        "API Key #%d bị lỗi (%s). Thử chuyển sang API Key #%d...",
-                        idx + 1, str(e)[:120], ((idx + 1) % n_keys) + 1
-                    )
-                else:
+                if attempt == n_try - 1:      # hết số key được phép thử cho lượt này
                     raise
+                log.warning("API Key #%d lỗi (%s) — thử Key #%d (%d/%d key mỗi lượt)...",
+                            idx + 1, str(e)[:120], ((idx + 1) % n_keys) + 1,
+                            n_try, n_keys)
 
-        raise last_error
+        raise last_error if last_error else RuntimeError("Không gọi được Gemini")
 
     def _parse(self, resp) -> list[PageLabel]:
         raw = getattr(resp, "parsed", None)
@@ -294,7 +330,7 @@ class OpenAIClassifier:
                  api_key: str | None = None, api_keys: list[str] | None = None,
                  dpi: int = 150, rules: list[str] | None = None,
                  base_url: str | None = None, provider_name: str = "openai",
-                 env_key: str = "OPENAI_API_KEY"):
+                 env_key: str = "OPENAI_API_KEY", request_timeout: float = 180.0):
         keys = [k.strip() for k in (api_keys or []) if k and k.strip()]
         if not keys and api_key:
             keys = [api_key.strip()]
@@ -310,6 +346,7 @@ class OpenAIClassifier:
         self.dpi = dpi
         self.base_url = base_url
         self.provider_name = provider_name
+        self.request_timeout = float(request_timeout)
         self.prompt = build_prompt(categories, rules)
         self.valid_categories = {c["key"] for c in categories} | {"khong_thuoc"}
 
@@ -319,9 +356,10 @@ class OpenAIClassifier:
         with tempfile.TemporaryDirectory(dir=get_safe_temp_dir()) as d:
             root = os.path.join(d, "page")
             with safe_input_path(pdf_path) as safe_path:
+                from assemble import PROC_TIMEOUT
                 subprocess.run(
                     ["pdftoppm", "-png", "-r", str(self.dpi), safe_path, root],
-                    check=True, capture_output=True
+                    check=True, capture_output=True, timeout=PROC_TIMEOUT
                 )
             pngs = sorted(f for f in os.listdir(d) if f.endswith(".png"))
             result = []
@@ -366,8 +404,8 @@ class OpenAIClassifier:
         last_error = None
         for i, key in enumerate(self.api_keys):
             try:
-                client = (OpenAI(api_key=key, base_url=self.base_url)
-                          if self.base_url else OpenAI(api_key=key))
+                kw = dict(api_key=key, timeout=self.request_timeout, max_retries=0)
+                client = OpenAI(base_url=self.base_url, **kw) if self.base_url else OpenAI(**kw)
                 resp = client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "user", "content": content}],
@@ -461,11 +499,12 @@ class QwenClassifier(OpenAIClassifier):
     def __init__(self, model: str, categories: list[dict],
                  api_key: str | None = None, api_keys: list[str] | None = None,
                  dpi: int = 150, rules: list[str] | None = None,
-                 base_url: str | None = None):
+                 base_url: str | None = None, request_timeout: float = 180.0):
         super().__init__(
             model=model, categories=categories, api_key=api_key, api_keys=api_keys,
             dpi=dpi, rules=rules, base_url=base_url or self.DEFAULT_BASE_URL,
-            provider_name="qwen", env_key="DASHSCOPE_API_KEY")
+            provider_name="qwen", env_key="DASHSCOPE_API_KEY",
+            request_timeout=request_timeout)
 
 
 # ============================================================
@@ -502,7 +541,12 @@ class ChainClassifier:
 # ============================================================
 _TRANSIENT_ERRORS = ("503", "UNAVAILABLE", "high demand",
                      "ResourceExhausted", "quota", "504", "502",
-                     "rate_limit", "overloaded", "529")
+                     "rate_limit", "overloaded", "529",
+                     # Mạng chập chờn / request quá hạn: đều đáng thử lại. Trước
+                     # đây thiếu nhóm này nên timeout bị coi là lỗi vĩnh viễn.
+                     "Timeout", "timeout", "timed out", "TimeoutError",
+                     "ConnectError", "ReadError", "RemoteProtocolError",
+                     "Connection reset", "Errno 60", "Errno 54", "Errno 110")
 
 
 def _is_transient(err: str) -> bool:
@@ -586,16 +630,23 @@ def _make_one_classifier(model: str, keys: list[str], config: dict) -> Classifie
     """Tạo 1 classifier cho 1 model (vendor suy ra từ tiền tố model)."""
     m = model.lower()
     cats, rules = config["categories"], config.get("rules")
+    timeout = float(config.get("request_timeout_sec", 180))
     if m.startswith("qwen"):
         return QwenClassifier(model=model, categories=cats, api_keys=keys,
                               dpi=int(config.get("render_dpi", 150)), rules=rules,
-                              base_url=config.get("qwen_base_url"))
+                              base_url=config.get("qwen_base_url"),
+                              request_timeout=timeout)
     if m.startswith(("gpt", "o1", "o3", "o4", "openai")):
         return OpenAIClassifier(model=model, categories=cats, api_keys=keys,
-                                dpi=int(config.get("render_dpi", 150)), rules=rules)
+                                dpi=int(config.get("render_dpi", 150)), rules=rules,
+                                request_timeout=timeout)
     # mặc định: Gemini (gemini-*)
-    return GeminiClassifier(model=model, categories=cats, api_keys=keys,
-                            media_resolution=config.get("media_resolution", "medium"), rules=rules)
+    return GeminiClassifier(
+        model=model, categories=cats, api_keys=keys,
+        media_resolution=config.get("media_resolution", "medium"), rules=rules,
+        request_timeout=float(config.get("request_timeout_sec", 180)),
+        file_wait_timeout=float(config.get("file_wait_timeout_sec", 180)),
+        max_keys_per_call=int(config.get("max_keys_per_call", 2)))
 
 
 def _make_classifier_from_specs(config: dict, key_specs: list[dict]) -> Classifier:
@@ -666,6 +717,9 @@ def make_classifier(config: dict) -> Classifier:
             api_keys=config.get("api_keys", []),
             media_resolution=config.get("media_resolution", "medium"),
             rules=config.get("rules"),
+            request_timeout=float(config.get("request_timeout_sec", 180)),
+            file_wait_timeout=float(config.get("file_wait_timeout_sec", 180)),
+            max_keys_per_call=int(config.get("max_keys_per_call", 2)),
         )
     elif provider == "openai":
         primary = OpenAIClassifier(
@@ -697,6 +751,9 @@ def make_classifier(config: dict) -> Classifier:
             api_keys=[fallback_key],
             media_resolution=fallback_cfg.get("media_resolution", config.get("media_resolution", "medium")),
             rules=config.get("rules"),
+            request_timeout=float(config.get("request_timeout_sec", 180)),
+            file_wait_timeout=float(config.get("file_wait_timeout_sec", 180)),
+            max_keys_per_call=int(config.get("max_keys_per_call", 2)),
         )
         return FallbackClassifier(
             primary=primary,

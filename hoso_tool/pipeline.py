@@ -12,10 +12,11 @@ import glob
 import json
 import logging
 import os
+import shutil
 from dataclasses import dataclass, field
 from typing import Callable
 
-from assemble import PdfAssembler, build_upright_pdf, page_count
+from assemble import ROT_TMP_PREFIX, PdfAssembler, build_upright_pdf, page_count
 from classify import ClassifyResult
 
 log = logging.getLogger("hoso")
@@ -89,29 +90,45 @@ def list_pdfs(folder: str, out_subdir: str) -> list[str]:
 
 
 def classify_folder(folder: str, config: dict,
-                    classify: Callable[[str], ClassifyResult]) -> list[dict]:
-    """Chạy classify cho mọi PDF, ghi _index.csv + _usage.json (token thật), trả list entry."""
+                    classify: Callable[[str], ClassifyResult],
+                    progress: Callable[..., None] | None = None) -> list[dict]:
+    """Chạy classify cho mọi PDF, ghi _index.csv + _usage.json (token thật), trả list entry.
+
+    `progress(file_thứ, tổng_file, tên_file, mô_tả_bước)` (tùy chọn) được gọi ở
+    từng mốc con. Một hồ sơ có thể mất 10-20 phút (OCR xoay chiều + gọi model);
+    không có callback này thì giao diện đứng hình suốt thời gian đó và người dùng
+    không phân biệt được "đang chạy" với "đã chết".
+    """
     out_subdir = config.get("output_subdir", "output")
     pdfs = list_pdfs(folder, out_subdir)
     if not pdfs:
         raise RuntimeError("không có file PDF nào")
 
+    def _report(fi: int, name: str, stage: str):
+        if progress is not None:
+            progress(fi + 1, len(pdfs), name, stage)
+
     entries: list[dict] = []
     usage = {"prompt_tokens": 0, "output_tokens": 0, "total_tokens": 0,
              "n_calls": 0, "model": config.get("model", "")}
     for fi, pdf in enumerate(pdfs):
+        name = os.path.basename(pdf)
         # Xoay các trang về ĐÚNG CHIỀU trước khi gửi model: trang lộn ngược khiến
         # model đọc sai → gán nhãn bừa. Góc phát hiện (OCR) lưu luôn vào index để
         # bước ghép dùng lại (không phải dò lại).
-        upright_pdf, rotations = build_upright_pdf(pdf)
+        _report(fi, name, "đọc & tách trang")
+        upright_pdf, rotations = build_upright_pdf(
+            pdf, progress=lambda n, tot, _fi=fi, _n=name: _report(
+                _fi, _n, f"kiểm tra chiều trang {n}/{tot}"))
         try:
+            _report(fi, name, "gửi model phân loại")
             result = classify(upright_pdf)
         finally:
-            if upright_pdf != pdf:
-                try:
-                    os.remove(upright_pdf)
-                except Exception:
-                    pass
+            # Bản đã xoay nằm trong thư mục tạm riêng (giữ tên file gốc để log
+            # đọc được) → xóa cả thư mục, đừng chỉ xóa file.
+            d = os.path.dirname(upright_pdf)
+            if upright_pdf != pdf and os.path.basename(d).startswith(ROT_TMP_PREFIX):
+                shutil.rmtree(d, ignore_errors=True)
         if rotations:
             n_rot = sum(1 for r in rotations.values() if r)
             if n_rot:
@@ -242,14 +259,17 @@ def real_cost(usage: dict, config: dict) -> float:
 
 def process_folder(folder: str, config: dict,
                    classify: Callable[[str], ClassifyResult],
-                   dry_run: bool = False) -> FolderResult:
+                   dry_run: bool = False,
+                   progress: Callable[..., None] | None = None) -> FolderResult:
     """CLI: classify + ghép một lượt. Lỗi -> trả FolderResult status=error (không sập batch)."""
     prefix = os.path.basename(os.path.normpath(folder)).strip()
     try:
-        entries = classify_folder(folder, config, classify)
+        entries = classify_folder(folder, config, classify, progress=progress)
     except Exception as e:
         return FolderResult(folder=folder, prefix=prefix, status="error",
                             error=f"{type(e).__name__}: {e}")
+    if progress is not None:
+        progress(1, 1, prefix, "ghép file PDF theo loại")
     return assemble_from_index(folder, config, entries, dry_run=dry_run)
 
 

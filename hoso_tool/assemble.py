@@ -23,10 +23,24 @@ OSD_MIN_CONFIDENCE = float(os.environ.get("HOSO_OSD_MIN_CONFIDENCE", "8"))
 # Tham số phát hiện xoay 0/180 bằng OCR (đếm số từ đọc được ở mỗi chiều).
 # Chiều nào ra nhiều chữ hơn rõ rệt là chiều đúng — ổn định cả trên trang chữ
 # thưa (bảng vật liệu, phụ lục) nơi Tesseract OSD không đáng tin.
-ORIENT_DPI = int(os.environ.get("HOSO_ORIENT_DPI", "120"))
+# DPI dò chiều: chỉ cần đủ để ĐẾM từ, không cần đọc chính xác. Đo trên bản lộn
+# ngược: 120->4.8s, 100->4.3s, 60->3.1s cho 8 trang, cả ba đều nhận đúng góc.
+# Chọn 100 cho an toàn với bản scan nhiễu; muốn nhanh nữa thì đặt biến môi
+# trường HOSO_ORIENT_DPI=60 SAU KHI đã tự kiểm trên hồ sơ thật.
+ORIENT_DPI = int(os.environ.get("HOSO_ORIENT_DPI", "100"))
 ORIENT_MIN_WORDS = int(os.environ.get("HOSO_ORIENT_MIN_WORDS", "10"))
 ORIENT_MARGIN = float(os.environ.get("HOSO_ORIENT_MARGIN", "1.3"))
 ORIENT_MIN_DIFF = int(os.environ.get("HOSO_ORIENT_MIN_DIFF", "6"))
+# Bỏ bước Tesseract tự thử lại với ảnh âm bản — ta chỉ đếm từ nên không cần,
+# mà nó ngốn thêm thời gian trên mỗi lượt.
+ORIENT_TESS_CONFIG = os.environ.get("HOSO_ORIENT_TESS_CONFIG", "-c tessedit_do_invert=0")
+
+# Trần thời gian cho mọi lệnh ngoài (poppler). Dữ liệu thường nằm trên Google
+# Drive File Stream — đọc là tải qua mạng, có thể treo vô hạn nếu không chặn.
+PROC_TIMEOUT = int(os.environ.get("HOSO_PROC_TIMEOUT", "300"))
+
+# Tiền tố thư mục tạm chứa bản PDF đã xoay đứng (caller dựa vào đây để dọn).
+ROT_TMP_PREFIX = "hoso_rot_"
 
 
 @functools.lru_cache(maxsize=1)
@@ -75,7 +89,8 @@ def _render_gray(page_pdf: str, dpi: int):
         root = os.path.join(d, "pg")
         subprocess.run(
             ["pdftoppm", "-gray", "-png", "-r", str(dpi), page_pdf, root],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=PROC_TIMEOUT)
         pngs = glob.glob(root + "*.png")
         if not pngs:
             return None
@@ -89,7 +104,8 @@ def _readable_word_count(img) -> int:
     cho nhiều từ hơn hẳn ảnh bị xoay ngược.
     """
     import pytesseract
-    d = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+    d = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT,
+                                  config=ORIENT_TESS_CONFIG)
     n = 0
     for t, c in zip(d["text"], d["conf"]):
         try:
@@ -155,11 +171,15 @@ def detect_page_rotation(page_pdf: str) -> int | None:
         return None
 
 
-def build_upright_pdf(src_pdf: str) -> tuple[str, dict[int, int]]:
+def build_upright_pdf(src_pdf: str, progress=None) -> tuple[str, dict[int, int]]:
     """Tạo bản PDF đã XOAY các trang về đúng chiều, để GỬI MODEL PHÂN LOẠI.
 
     Vì model (Gemini) đọc trang lộn ngược rất kém → gán nhãn sai; xoay đứng
     trước khi gửi giúp phân loại chính xác hơn hẳn.
+
+    `progress(trang_thứ, tổng_trang)` (tùy chọn) được gọi trước khi OCR mỗi
+    trang — bước này chiếm phần lớn thời gian xử lý một hồ sơ, nên UI cần nó để
+    hiển thị tiến trình thay vì đứng hình.
 
     Trả về (đường_dẫn_pdf, {page_no: góc_đã_phát_hiện}). Góc này (OCR) cũng dùng
     lại cho bước ghép (lưu vào index) nên KHÔNG phải dò lại. Nếu không trang nào
@@ -173,7 +193,8 @@ def build_upright_pdf(src_pdf: str) -> tuple[str, dict[int, int]]:
         pattern = os.path.join(tmpdir, "p-%d.pdf")
         with safe_input_path(src_pdf) as safe:
             subprocess.run(["pdfseparate", safe, pattern], check=True,
-                           capture_output=True, encoding="utf-8", errors="ignore")
+                           capture_output=True, encoding="utf-8", errors="ignore",
+                           timeout=PROC_TIMEOUT)
         pages: dict[int, str] = {}
         for fn in os.listdir(tmpdir):
             m = re.match(r"p-(\d+)\.pdf$", fn)
@@ -186,7 +207,10 @@ def build_upright_pdf(src_pdf: str) -> tuple[str, dict[int, int]]:
         rotations: dict[int, int] = {}
         rebuilt: list[str] = []
         any_rot = False
-        for i in sorted(pages):
+        n_pages = len(pages)
+        for n, i in enumerate(sorted(pages), 1):
+            if progress is not None:
+                progress(n, n_pages)
             pf = pages[i]
             rot = detect_page_rotation(pf)
             if rot is not None:
@@ -208,10 +232,14 @@ def build_upright_pdf(src_pdf: str) -> tuple[str, dict[int, int]]:
         if not any_rot:
             return src_pdf, rotations  # đã đứng hết → dùng bản gốc, khỏi ghép lại
 
-        fd, out_pdf = tempfile.mkstemp(suffix=".pdf", dir=get_safe_temp_dir())
-        os.close(fd)
+        # Giữ NGUYÊN tên file gốc cho bản đã xoay: mọi log phía sau (retry, xoay
+        # key, lỗi model) đều in basename — dùng tên tạm ngẫu nhiên thì nhật ký
+        # chỉ còn "tmp0ubivrtc.pdf", không tra ngược ra hồ sơ nào.
+        out_dir = tempfile.mkdtemp(prefix=ROT_TMP_PREFIX, dir=get_safe_temp_dir())
+        out_pdf = os.path.join(out_dir, os.path.basename(src_pdf))
         subprocess.run(["pdfunite", *rebuilt, out_pdf], check=True,
-                       capture_output=True, encoding="utf-8", errors="ignore")
+                       capture_output=True, encoding="utf-8", errors="ignore",
+                       timeout=PROC_TIMEOUT)
         return out_pdf, rotations
     except Exception as e:
         logger.warning("Không tạo được bản PDF xoay đứng cho %s (%s) — gửi bản gốc.",
@@ -251,9 +279,30 @@ def safe_input_path(path: str):
         yield path
 
 
+@contextlib.contextmanager
+def ascii_name_path(path: str):
+    """Cho mượn một đường dẫn có TÊN FILE thuần ASCII (copy tạm nếu cần).
+
+    Dùng khi GỬI FILE LÊN API: tên file tiếng Việt từng làm SDK ném
+    UnicodeEncodeError ('ascii' codec ... '\\u0110') — lỗi này KHÔNG tạm thời nên
+    retry vô ích, cả folder hỏng theo. Bản SDK hiện tại không còn lỗi, nhưng
+    copy sang tên ASCII là rẻ và loại hẳn cả lớp rủi ro này.
+    """
+    if os.path.basename(path).isascii():
+        yield path
+        return
+    d = tempfile.mkdtemp(prefix="hoso_ascii_", dir=get_safe_temp_dir())
+    try:
+        safe = os.path.join(d, "upload" + (os.path.splitext(path)[1] or ".pdf"))
+        shutil.copyfile(path, safe)
+        yield safe
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def page_count(pdf_path: str) -> int:
     with safe_input_path(pdf_path) as safe_path:
-        out = subprocess.run(["pdfinfo", safe_path], capture_output=True, encoding="utf-8", errors="ignore", check=True)
+        out = subprocess.run(["pdfinfo", safe_path], capture_output=True, encoding="utf-8", errors="ignore", check=True, timeout=PROC_TIMEOUT)
         m = re.search(r"^Pages:\s+(\d+)", out.stdout, re.MULTILINE)
         if not m:
             raise RuntimeError(f"Không đọc được số trang: {pdf_path}")
@@ -263,7 +312,7 @@ def page_count(pdf_path: str) -> int:
 def has_text_layer(pdf_path: str, sample_chars: int = 20) -> bool:
     """True nếu PDF có lớp text (không phải scan thuần ảnh)."""
     with safe_input_path(pdf_path) as safe_path:
-        out = subprocess.run(["pdftotext", safe_path, "-"], capture_output=True, encoding="utf-8", errors="ignore")
+        out = subprocess.run(["pdftotext", safe_path, "-"], capture_output=True, encoding="utf-8", errors="ignore", timeout=PROC_TIMEOUT)
         return len(out.stdout.strip()) >= sample_chars
 
 
@@ -286,7 +335,8 @@ class PdfAssembler:
         pattern = os.path.join(outdir, "p-%d.pdf")
         with safe_input_path(src_pdf) as safe_src:
             subprocess.run(["pdfseparate", safe_src, pattern], check=True,
-                           capture_output=True, encoding="utf-8", errors="ignore")
+                           capture_output=True, encoding="utf-8", errors="ignore",
+                           timeout=PROC_TIMEOUT)
         pages: dict[int, str] = {}
         for fn in os.listdir(outdir):
             m = re.match(r"p-(\d+)\.pdf$", fn)
@@ -317,9 +367,12 @@ class PdfAssembler:
                         page.rotate(rotation)
                         writer.add_page(page)
 
-                        # Tạo một file tạm đã xoay
-                        fd, rot_path = tempfile.mkstemp(suffix=".pdf", dir=get_safe_temp_dir())
-                        os.close(fd)
+                        # Ghi bản đã xoay VÀO workdir của assembler để cleanup()
+                        # dọn cùng lúc (mkstemp ở temp chung sẽ bị bỏ quên).
+                        rot_dir = os.path.join(self.workdir, "_rot")
+                        os.makedirs(rot_dir, exist_ok=True)
+                        rot_path = os.path.join(
+                            rot_dir, f"{len(single_pdfs)}-{page_no}-{rotation}.pdf")
                         with open(rot_path, "wb") as f:
                             writer.write(f)
                         page_file = rot_path
@@ -337,7 +390,8 @@ class PdfAssembler:
                 os.close(fd)
                 try:
                     subprocess.run(["pdfunite", *single_pdfs, temp_out], check=True,
-                                   capture_output=True, encoding="utf-8", errors="ignore")
+                                   capture_output=True, encoding="utf-8", errors="ignore",
+                                   timeout=PROC_TIMEOUT)
                     shutil.copyfile(temp_out, out_path)
                 finally:
                     try:
@@ -346,7 +400,8 @@ class PdfAssembler:
                         pass
             else:
                 subprocess.run(["pdfunite", *single_pdfs, out_path], check=True,
-                               capture_output=True, encoding="utf-8", errors="ignore")
+                               capture_output=True, encoding="utf-8", errors="ignore",
+                               timeout=PROC_TIMEOUT)
         return len(single_pdfs)
 
     def cleanup(self):

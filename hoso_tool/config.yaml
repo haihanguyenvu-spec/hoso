@@ -19,8 +19,9 @@ media_resolution: "medium"    # low | medium | high
 # Chỉ những key có model KHỚP mới được dùng cho chế độ đó (đặt model cho từng key trên UI).
 default_mode: "cham"          # nhanh | cham  (mặc định: chậm)
 modes:
-  nhanh: ["gemini-3.5-flash", "qwen3.7-plus"]   # nhanh: Google 3.5 + Qwen 3.7-plus
-  cham:  ["qwen3.6-flash"]                        # chậm: Qwen 3.6-flash
+  # Cả 2 chế độ: Gemini CHỦ ĐẠO → Qwen DỰ PHÒNG. Khác nhau ở phiên bản Gemini.
+  nhanh: ["gemini-3.5-flash", "qwen3.7-plus"]   # nhanh: Gemini 3.5 → dự phòng Qwen 3.7-plus
+  cham:  ["gemini-2.5-flash", "qwen3.6-flash"]  # chậm:  Gemini 2.5 → dự phòng Qwen 3.6-flash
 # Model mặc định của mỗi nhà cung cấp — dùng làm FALLBACK khi provider có key nhưng
 # không nằm trong chế độ (vd chế độ Chậm cần Qwen nhưng chỉ có key Gemini → vẫn chạy Gemini).
 provider_default_model:
@@ -55,7 +56,16 @@ sample_rate: 0.05             # tỉ lệ folder "ok" được đánh dấu đ�
 # ---- Batch ----
 project_total_folders: 800    # tổng folder dự định chạy -> dùng để DỰ PHÓNG chi phí
 workers: 4                    # số folder xử lý song song
-max_retries: 4                # số lần thử lại khi gọi API lỗi (backoff luỹ thừa)
+max_retries: 3                # số lần thử lại khi gọi API lỗi TẠM THỜI (backoff luỹ thừa)
+
+# ---- Chống treo (đừng để 0 / bỏ trống) ----
+# Không đặt timeout thì SDK Google chờ VÔ HẠN: một socket chết là treo cả batch
+# mà không ném lỗi nào, nên retry ở trên không bao giờ chạy.
+request_timeout_sec: 180      # trần cho MỖI request tới API (upload / generate)
+file_wait_timeout_sec: 180    # trần chờ Gemini xử lý xong file vừa upload
+# Mỗi key hỏng = thêm 1 lượt upload + generate cho CÙNG file (có thể 20MB).
+# Có 5 key mà không chặn thì 1 file hỏng ngốn 5 lượt, nhân tiếp với max_retries.
+max_keys_per_call: 2          # số API key thử tối đa trong 1 lần phân loại
 
 # ---- Quy tắc nghiệp vụ (nhồi vào prompt; sửa ở đây, không cần đụng code) ----
 rules:

@@ -6,10 +6,12 @@ Mọi xử lý chạy LOCAL; ảnh hồ sơ chỉ gửi lên vision model ở b�
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 import pandas as pd
@@ -23,6 +25,7 @@ from run import make_retrying_classify  # noqa: E402  (tự thử lại khi API 
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
 NONE_LABEL = "(Không thuộc)"
+log = logging.getLogger("hoso")
 
 
 # ---------- Lưu trữ key (ghi được kể cả khi app cài trong Program Files) ----------
@@ -212,17 +215,27 @@ def folder_status(folder: str, cfg: dict) -> str:
 
 
 @st.cache_data(ttl=5, show_spinner=False)
-def discover(input_root: str, cfg: dict) -> list[str]:
+def discover(input_root: str, cfg: dict) -> tuple[list[str], str]:
+    """Trả (danh sách folder hồ sơ, thông báo lỗi nếu không quét được).
+
+    Với thư mục Google Drive bị macOS chặn quyền, os.path.isdir vẫn TRUE (stat
+    được) nhưng os.listdir ném PermissionError — trước đây lỗi này làm sập cả
+    app kèm traceback thô thay vì chỉ chỗ cấp quyền.
+    """
     out_subdir = cfg.get("output_subdir", "output")
-    res = []
+    res: list[str] = []
     if not os.path.isdir(input_root):
-        return res
-    for name in sorted(os.listdir(input_root)):
+        return res, ""
+    try:
+        names = sorted(os.listdir(input_root))
+    except OSError as e:
+        return res, f"{type(e).__name__}: {e}"
+    for name in names:
         d = os.path.join(input_root, name)
         if os.path.isdir(d) and name not in (out_subdir, "_review") \
                 and pipeline.list_pdfs(d, out_subdir):
             res.append(d)
-    return res
+    return res, ""
 
 
 def render_doc_types_editor(cfg: dict):
@@ -392,6 +405,117 @@ def render_api_keys_editor(cfg: dict):
         st.rerun()
 
 
+# ---------- Nhật ký chạy (ghi ra file, có mốc thời gian) ----------
+def setup_logging() -> str:
+    """Bật ghi log ra file cho giao diện.
+
+    Trước đây app.py KHÔNG cấu hình logging: mọi cảnh báo của classify (503, xoay
+    key, nhãn hỏng) chỉ ra stderr rồi mất. Khi batch đứng thì không còn gì để dò.
+    """
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    d = os.path.join(user_data_dir(), "logs")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "hoso.log")
+    root = logging.getLogger()
+    if not any(getattr(h, "_hoso_handler", False) for h in root.handlers):
+        h = RotatingFileHandler(path, maxBytes=5_000_000, backupCount=5, encoding="utf-8")
+        h.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
+        h._hoso_handler = True          # dấu để rerun sau không gắn thêm handler trùng
+        root.addHandler(h)
+        root.setLevel(logging.INFO)
+        # httpx log từng request kèm mã 200/503 và thời điểm — chính là thứ đã
+        # dựng lại được timeline khi truy nguyên sự cố, nên giữ.
+        logging.getLogger("httpx").setLevel(logging.INFO)
+    return path
+
+
+# ---------- Báo cáo tổng ----------
+SUMMARY_COLS = ["folder", "status", "sample_check", "total_pages", "classified_pages",
+                "low_conf", "missing", "est_cost_usd", "real_tokens", "real_cost_usd",
+                "reasons"]
+
+
+def upsert_summary(input_root: str, res, cfg: dict):
+    """Ghi đè đúng 1 dòng của folder vào _review/summary.csv.
+
+    Dùng chung cho tab ① và nút ghép ở tab ②. Trước đây tab ② chỉ ghi .done nên
+    báo cáo tổng vẫn giữ trạng thái 'error' của lần chạy hỏng trước đó.
+    """
+    import csv
+
+    from run import est_cost
+
+    review_dir = os.path.join(input_root, "_review")
+    os.makedirs(review_dir, exist_ok=True)
+    path = os.path.join(review_dir, "summary.csv")
+    rows: list[dict] = []
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                rows = [r for r in csv.DictReader(f) if r.get("folder") != res.prefix]
+        except Exception:
+            rows = []
+    rows.append({
+        "folder": res.prefix, "status": res.status, "sample_check": "",
+        "total_pages": str(res.total_pages), "classified_pages": str(res.classified_pages),
+        "low_conf": str(res.low_conf_pages), "missing": ", ".join(res.categories_missing),
+        "est_cost_usd": f"{est_cost(res.total_pages, cfg):.4f}",
+        "real_tokens": str(res.total_tokens), "real_cost_usd": f"{res.real_cost:.4f}",
+        "reasons": " | ".join(res.reasons) or res.error,
+    })
+    rows.sort(key=lambda r: r.get("folder", ""))
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=SUMMARY_COLS, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+
+
+# ---------- Hàng đợi batch (sống sót qua rerun) ----------
+BATCH = "batch_state"
+
+
+def fmt_dur(sec: float) -> str:
+    sec = int(max(0, sec))
+    if sec >= 3600:
+        return f"{sec // 3600}h{(sec % 3600) // 60:02d}m"
+    if sec >= 60:
+        return f"{sec // 60}m{sec % 60:02d}s"
+    return f"{sec}s"
+
+
+def start_batch(folders: list[str], force: bool):
+    st.session_state[BATCH] = {
+        "queue": list(folders), "total": len(folders), "force": force,
+        "ok": 0, "flagged": 0, "errors": 0, "skipped": 0,
+        "pages": 0, "tokens": 0, "cost": 0.0,
+        "log": [], "attempts": {}, "durations": [],
+        "running": True, "started": time.time(),
+    }
+
+
+def stop_batch():
+    """on_click của nút Dừng — chạy TRƯỚC thân script nên folder kế sẽ không khởi động."""
+    b = st.session_state.get(BATCH)
+    if b:
+        b["running"] = False
+
+
+def get_classifier(cfg: dict, key_specs: list[dict]):
+    """Dựng classifier một lần rồi tái dùng qua các rerun.
+
+    Mỗi lần dựng là mở ngần ấy client HTTP mới; dựng lại cho từng folder sẽ rò
+    connection pool. Chỉ dựng lại khi chế độ hoặc bộ key đổi.
+    """
+    sig = (cfg.get("mode"), tuple(sorted((s["provider"], s["key"][-6:]) for s in key_specs)))
+    if st.session_state.get("classifier_sig") != sig:
+        cfg["key_specs"] = key_specs
+        st.session_state["classifier"] = make_classifier(cfg)
+        st.session_state["classifier_sig"] = sig
+    return st.session_state["classifier"]
+
+
 # ---------- UI ----------
 st.set_page_config(page_title="Phân loại & Ghép hồ sơ PDF", page_icon="📄", layout="wide", initial_sidebar_state="expanded")
 # Ẩn các nút/chrome mặc định của Streamlit (menu ⋮, Deploy, footer "Made with Streamlit")
@@ -403,6 +527,7 @@ footer {visibility: hidden;}
 [data-testid="stHeaderActionElements"] {display: none;}
 </style>
 """, unsafe_allow_html=True)
+LOG_PATH = setup_logging()
 cfg = load_config()
 name_by_key, key_by_name = label_maps(cfg)
 
@@ -486,25 +611,180 @@ if not os.path.isdir(input_root):
             "Hoặc vào System Settings → Privacy & Security → Full Disk Access → bật Terminal.")
     st.stop()
 
-folders = discover(input_root, cfg)
+folders, scan_error = discover(input_root, cfg)
+if scan_error:
+    st.error(f"❌ Không đọc được nội dung thư mục gốc — `{scan_error}`")
+    st.info("💡 Thư mục tồn tại nhưng macOS chặn quyền liệt kê (rất hay gặp với "
+            "thư mục Google Drive). Mở **System Settings → Privacy & Security → "
+            "Full Disk Access**, bật cho Terminal (hoặc ứng dụng đang chạy tool), "
+            "rồi khởi động lại tool.")
+    st.stop()
 
 st.divider()
 tab1, tab2, tab3 = st.tabs(["① Phân loại", "② Review & Sửa nhãn", "③ Tổng kết"])
 
 
 # ===== Tab 1: Phân loại =====
+def render_batch_progress(b: dict):
+    """Bảng tiến trình: đang làm gì, xong bao nhiêu, còn bao lâu, tốn bao nhiêu."""
+    done = b["total"] - len(b["queue"])
+    st.progress(done / b["total"] if b["total"] else 1.0,
+                text=f"Folder {done}/{b['total']}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("✅ Xong", b["ok"] + b["flagged"])
+    c2.metric("⚠️ Cần kiểm", b["flagged"])
+    c3.metric("❌ Lỗi", b["errors"])
+    c4.metric("⏭️ Bỏ qua", b["skipped"])
+
+    avg = sum(b["durations"]) / len(b["durations"]) if b["durations"] else 0.0
+    bits = [f"⏱️ đã chạy **{fmt_dur(time.time() - b['started'])}**"]
+    if avg:
+        bits.append(f"TB **{fmt_dur(avg)}**/folder")
+        if b["queue"]:
+            bits.append(f"còn khoảng **{fmt_dur(avg * len(b['queue']))}**")
+    if b["tokens"]:
+        bits.append(f"token **{b['tokens']:,}** · chi phí **${b['cost']:.4f}**")
+    st.caption(" · ".join(bits))
+
+    if b["log"]:
+        icons = {"ok": "✅", "flagged": "⚠️", "error": "❌", "skip": "⏭️"}
+        with st.expander(f"📜 Nhật ký ({len(b['log'])} folder)", expanded=False):
+            for status, name, msg, dt in reversed(b["log"]):
+                st.markdown(f"{icons.get(status, '•')} **{name}** · {fmt_dur(dt)} — {msg}")
+
+
 with tab1:
     st.subheader("Phân loại trang bằng vision model")
 
-    if not folders:
-        st.info("Không thấy folder hồ sơ nào trong thư mục gốc. Hãy chắc chắn mỗi subfolder chứa ít nhất 1 file PDF.")
-    else:
-        rows = [{"Folder": os.path.basename(f), "Số PDF": len(pipeline.list_pdfs(f, cfg["output_subdir"])),
+    out_subdir = cfg.get("output_subdir", "output")
+    key_specs_active = [{"provider": s.get("provider", DEFAULT_PROVIDER), "key": s["key"].strip()}
+                        for s in st.session_state.key_specs if s.get("key", "").strip()]
+    batch = st.session_state.get(BATCH)
+    batch_running = bool(batch and batch["running"] and batch["queue"])
+
+if batch_running:
+    # ---- ĐANG CHẠY: mỗi lần rerun xử lý ĐÚNG MỘT folder rồi tự gọi lại ----
+    # Trước đây cả vòng lặp nằm trong `if st.button(...)`, nên mọi rerun (websocket
+    # reconnect khi tab bị ngủ, lỡ chạm widget, F5) đều ném RerunException/
+    # StopException — hai lớp kế thừa BaseException nên `except Exception` không
+    # bắt được — batch chết lặng lẽ và nút trở về chưa-bấm. Giữ hàng đợi trong
+    # session_state thì rerun chỉ mất tối đa folder đang dở, rồi chạy tiếp.
+    with tab1:
+        render_batch_progress(batch)
+        st.button("⏹ Dừng", on_click=stop_batch, width="stretch",
+                  help="Dừng ngay. Folder đang dở sẽ được làm lại từ đầu ở lần chạy sau.")
+
+        folder = batch["queue"][0]
+        fname = os.path.basename(folder)
+        done_marker = os.path.join(folder, out_subdir, ".done")
+
+        if os.path.exists(done_marker) and not batch["force"]:
+            batch["queue"].pop(0)
+            batch["skipped"] += 1
+            batch["log"].append(("skip", fname, "đã ghép trước đó", 0.0))
+            st.rerun()
+
+        # Folder bị gián đoạn đi gián đoạn lại thì bỏ, tránh kẹt vòng lặp vô hạn.
+        batch["attempts"][folder] = batch["attempts"].get(folder, 0) + 1
+        if batch["attempts"][folder] > 2:
+            batch["queue"].pop(0)
+            batch["errors"] += 1
+            batch["log"].append(("error", fname, "bị gián đoạn 2 lần liên tiếp — bỏ qua", 0.0))
+            st.rerun()
+
+        status = st.status(f"⏳ Đang xử lý **{fname}**…", expanded=True)
+        stage = status.empty()
+
+        def on_progress(i_file, n_files, name, step):
+            # Mỗi lần gọi là một lệnh st.* → đẩy tin lên trình duyệt, giữ kết nối
+            # sống và cho người dùng thấy máy vẫn đang chạy chứ không phải treo.
+            stage.markdown(f"**File {i_file}/{n_files}** · `{name}`  \n{step}")
+
+        def on_notify(text):
+            stage.warning(f"⚠️ {text}")
+
+        n_done = batch["total"] - len(batch["queue"]) + 1
+        log.info("=== BẮT ĐẦU [%d/%d] %s ===", n_done, batch["total"], fname)
+        t0 = time.time()
+        res, err = None, ""
+        try:
+            classify = make_retrying_classify(
+                get_classifier(cfg, key_specs_active),
+                int(cfg.get("max_retries", 3)), notify=on_notify)
+            res = pipeline.process_folder(folder, cfg, classify, dry_run=False,
+                                          progress=on_progress)
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+            log.exception("Folder %s hỏng ngoài dự kiến", fname)
+        dt = time.time() - t0
+
+        batch["queue"].pop(0)
+        batch["durations"].append(dt)
+        if res is None:
+            batch["errors"] += 1
+            batch["log"].append(("error", fname, err, dt))
+            status.update(label=f"❌ {fname} — {err}", state="error", expanded=False)
+        else:
+            upsert_summary(input_root, res, cfg)
+            batch["pages"] += res.total_pages
+            batch["tokens"] += res.total_tokens
+            batch["cost"] += res.real_cost
+            if res.status == "error":
+                batch["errors"] += 1
+                batch["log"].append(("error", fname, res.error, dt))
+                status.update(label=f"❌ {fname} — {res.error}", state="error", expanded=False)
+            else:
+                os.makedirs(os.path.dirname(done_marker), exist_ok=True)
+                open(done_marker, "w").close()
+                batch["attempts"].pop(folder, None)
+                note = "; ".join(res.reasons) if res.reasons else "OK"
+                batch["flagged" if res.status == "flagged" else "ok"] += 1
+                batch["log"].append((res.status, fname,
+                                     f"{len(res.outputs)} file · "
+                                     f"{res.classified_pages}/{res.total_pages} trang · {note}", dt))
+                status.update(label=f"✅ {fname} — {res.classified_pages}/{res.total_pages} trang",
+                              state="complete", expanded=False)
+        log.info("=== XONG [%d/%d] %s sau %s ===", n_done, batch["total"], fname, fmt_dur(dt))
+        st.rerun()
+
+elif batch:
+    # ---- ĐÃ DỪNG / ĐÃ XONG ----
+    with tab1:
+        b = batch
+        total_done = b["ok"] + b["flagged"]
+        head = (f"{total_done} folder xong ({b['flagged']} cần kiểm) · "
+                f"{b['errors']} lỗi · {b['skipped']} bỏ qua · "
+                f"tổng {fmt_dur(time.time() - b['started'])}")
+        if b["queue"]:
+            st.warning(f"⏸️ Đã dừng — {head}. Còn **{len(b['queue'])}** folder chưa chạy.")
+        elif b["errors"]:
+            st.warning(f"⚠️ Hoàn thành — {head}")
+        else:
+            st.success(f"🎉 Hoàn thành — {head}. Sang tab ② để review nhãn nếu cần.")
+        render_batch_progress(b)
+
+        c1, c2 = st.columns(2)
+        if b["queue"] and c1.button("▶ Chạy tiếp", type="primary", width="stretch"):
+            b["running"] = True
+            b["started"] = time.time() - sum(b["durations"])
+            st.rerun()
+        if c2.button("✖️ Đóng bảng kết quả", width="stretch"):
+            del st.session_state[BATCH]
+            st.rerun()
+
+elif not folders:
+    with tab1:
+        st.info("Không thấy folder hồ sơ nào trong thư mục gốc. "
+                "Hãy chắc chắn mỗi subfolder chứa ít nhất 1 file PDF.")
+
+else:
+    with tab1:
+        rows = [{"Folder": os.path.basename(f), "Số PDF": len(pipeline.list_pdfs(f, out_subdir)),
                  "Trạng thái": folder_status(f, cfg)} for f in folders]
         st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
         todo = [f for f in folders if "chưa chạy" in folder_status(f, cfg)]
-        done_folders = [f for f in folders if "đã ghép" in folder_status(f, cfg)]
 
         col_pick, col_force = st.columns([5, 2])
         with col_pick:
@@ -518,10 +798,6 @@ with tab1:
                 value=False,
                 help="Nếu bật: cho phép xử lý lại các folder đã có dấu ✅. "
                      "Nếu tắt (mặc định): các folder đã ghép sẽ bị bỏ qua dù có chọn.")
-
-        out_subdir = cfg.get("output_subdir", "output")
-        key_specs_active = [{"provider": s.get("provider", DEFAULT_PROVIDER), "key": s["key"].strip()}
-                            for s in st.session_state.key_specs if s.get("key", "").strip()]
         # Nếu chế độ ưu tiên nhà cung cấp chưa có key → vẫn chạy bằng key sẵn có (fallback), chỉ báo nhẹ.
         _need = {_provider_of_model(m) for m in cfg.get("modes", {}).get(cfg.get("mode", ""), [])}
         _have = {s["provider"] for s in key_specs_active}
@@ -529,112 +805,16 @@ with tab1:
             _lbl = ", ".join(PROVIDER_LABELS.get(p, p) for p in _need)
             st.info(f"ℹ️ Chế độ **{cfg.get('mode')}** ưu tiên **{_lbl}** (chưa có key) → "
                     "sẽ chạy bằng key hiện có làm dự phòng. Thêm key ở ⚙️ Cài đặt nếu muốn dùng đúng model.")
-        btn_disabled = not (pick and key_specs_active)
-        if st.button("▶ Phân loại & Tạo 6 file PDF", type="primary", disabled=btn_disabled):
-            st.toast("⏳ Đang khởi tạo bộ xử lý...", icon="🚀")
-            with st.spinner("Đang chuẩn bị mô hình..."):
-                cfg["key_specs"] = key_specs_active
-                classifier = make_classifier(cfg)
-                classify = make_retrying_classify(classifier, int(cfg.get("max_retries", 4)))
-                sel = [f for f in folders if os.path.basename(f) in pick]
-                n_total = len(sel)
-            bar = st.progress(0.0)
-            status_box = st.empty()
-            n_err = 0
-            n_skip = 0
-            for i, f in enumerate(sel, 1):
-                fname = os.path.basename(f)
-                done_marker = os.path.join(f, out_subdir, ".done")
-
-                # --- Bỏ qua folder đã xong (trừ khi bật force_rerun) ---
-                if os.path.exists(done_marker) and not force_rerun:
-                    n_skip += 1
-                    st.info(f"⏭️ Bỏ qua **{fname}** — đã ghép trước đó (bật 'Chạy lại folder đã xong' để xử lý lại).")
-                    bar.progress(i / n_total)
-                    continue
-
-                # --- Banner tiến độ ---
-                status_box.info(f"⏳ **Đang xử lý folder {i}/{n_total}: {fname}** "
-                                f"— đang gọi vision model, vui lòng chờ...")
-                try:
-                    from pipeline import process_folder
-                    res = process_folder(f, cfg, classify, dry_run=False)
-                    
-                    # Đánh dấu đã hoàn thành
-                    if res.status in ("ok", "flagged"):
-                        open(done_marker, "w").close()
-                        
-                    # Hiển thị kết quả
-                    if res.reasons:
-                        st.warning(f"⚠️ {fname}: {len(res.outputs)} file · {res.classified_pages}/{res.total_pages} trang · "
-                                   + "; ".join(res.reasons))
-                    else:
-                        st.success(f"✅ {fname}: {len(res.outputs)} file · {res.classified_pages}/{res.total_pages} trang")
-                        
-                    # Ghi nhận vào báo cáo tổng
-                    from run import write_summary, est_cost
-                    review_dir = os.path.join(input_root, "_review")
-                    os.makedirs(review_dir, exist_ok=True)
-                    summ_path = os.path.join(review_dir, "summary.csv")
-                    
-                    # Đọc summary cũ (nếu có)
-                    import csv
-                    rows = []
-                    if os.path.exists(summ_path):
-                        with open(summ_path, "r", encoding="utf-8-sig") as csv_f:
-                            reader = csv.DictReader(csv_f)
-                            rows = list(reader)
-                    
-                    # Xóa dòng cũ của folder này (nếu đã từng chạy)
-                    rows = [row for row in rows if row.get("folder") != res.prefix]
-                    
-                    # Thêm dòng mới
-                    new_row = {
-                        "folder": res.prefix,
-                        "status": res.status,
-                        "sample_check": "",
-                        "total_pages": str(res.total_pages),
-                        "classified_pages": str(res.classified_pages),
-                        "low_conf": str(res.low_conf_pages),
-                        "missing": ", ".join(res.categories_missing),
-                        "est_cost_usd": f"{est_cost(res.total_pages, cfg):.4f}",
-                        "real_tokens": str(res.total_tokens),
-                        "real_cost_usd": f"{res.real_cost:.4f}",
-                        "reasons": " | ".join(res.reasons) or res.error
-                    }
-                    rows.append(new_row)
-                    rows.sort(key=lambda x: x.get("folder", ""))
-                    
-                    # Ghi lại file
-                    if rows:
-                        with open(summ_path, "w", newline="", encoding="utf-8-sig") as csv_f:
-                            w = csv.DictWriter(csv_f, fieldnames=list(rows[0].keys()))
-                            w.writeheader()
-                            w.writerows(rows)
-                            
-                except Exception as e:
-                    n_err += 1
-                    msg = str(e)
-                    if any(t in msg for t in ("503", "UNAVAILABLE", "high demand",
-                                               "fallback cũng lỗi", "Cả primary lẫn fallback")):
-                        both = "cả 2 key đều lỗi" if cfg.get("fallback", {}).get("provider") == "gemini" else "503"
-                        st.error(f"✗ {fname}: Gemini quá tải ({both}). "
-                                 "Đợi vài phút rồi bấm chạy lại — folder chưa xong sẽ tự chạy lại.")
-                    else:
-                        st.error(f"✗ {fname}: {msg}")
-                bar.progress(i / n_total)
-
-            # Tổng kết
-            if n_err:
-                status_box.warning(f"⚠️ Hoàn thành với {n_err} folder lỗi. Bấm chạy lại để xử lý các folder chưa xong.")
-            elif n_skip == n_total:
-                status_box.info(f"ℹ️ Tất cả {n_total} folder đã được xử lý trước đó — không có gì mới. "
-                                "Bật 'Chạy lại folder đã xong' nếu muốn xử lý lại.")
-            else:
-                processed = n_total - n_skip - n_err
-                status_box.success(f"🎉 Hoàn thành {processed} folder mới"
-                                   + (f" (bỏ qua {n_skip} folder đã xong)" if n_skip else "")
-                                   + "! Sang tab ② để review nhãn nếu cần.")
+        if not key_specs_active:
+            st.warning("⚠️ Chưa có API key nào. Vào ⚙️ **Cài đặt → API Keys** để nhập.")
+        if st.button("▶ Phân loại & Tạo 6 file PDF", type="primary",
+                     disabled=not (pick and key_specs_active), width="stretch"):
+            sel = [f for f in folders if os.path.basename(f) in pick]
+            log.info("### BẮT ĐẦU ĐỢT CHẠY: %d folder | chế độ=%s | %d key ###",
+                     len(sel), cfg.get("mode"), len(key_specs_active))
+            start_batch(sel, force_rerun)
+            st.rerun()
+        st.caption(f"📝 Nhật ký chi tiết ghi tại `{LOG_PATH}` — gửi file này khi cần dò lỗi.")
 
 
 # ===== Tab 2: Review & sửa nhãn =====
@@ -705,6 +885,9 @@ with tab2:
         if c2.button("📦 Tạo 6 file PDF", type="primary", key=f"build::{folder}"):
             res = pipeline.assemble_from_index(folder, cfg, entries)
             open(os.path.join(folder, cfg["output_subdir"], ".done"), "w").close()
+            # Cập nhật luôn báo cáo tổng: trước đây nút này chỉ ghi .done nên tab ③
+            # vẫn hiện trạng thái 'error' của lần chạy hỏng trước.
+            upsert_summary(input_root, res, cfg)
             st.success(f"Đã tạo {len(res.outputs)} file ({res.classified_pages}/{res.total_pages} trang).")
             if res.total_tokens:
                 st.caption(f"💰 Token thật: {res.total_tokens:,} · Chi phí thực ≈ ${res.real_cost:.4f} "
