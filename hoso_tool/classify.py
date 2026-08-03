@@ -14,14 +14,51 @@ import logging
 import os
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from typing import Protocol
 
-log = logging.getLogger("hoso")
-
 from pydantic import BaseModel
 
+log = logging.getLogger("hoso")
+
+# Lỗi thuộc về BẢN THÂN API KEY, thử lại bao nhiêu lần cũng vô ích.
+_DEAD_KEY_ERRORS = ("credits are depleted", "API_KEY_INVALID", "API key not valid",
+                    "PERMISSION_DENIED", "billing", "SERVICE_DISABLED")
+
+
+def _is_dead_key(err: str) -> bool:
+    return any(t in err for t in _DEAD_KEY_ERRORS)
+
+
+def _with_deadline(fn, seconds: float, what: str):
+    """Chạy `fn` ở thread riêng và ÉP trần thời gian thực.
+
+    Timeout của httpx chỉ giới hạn KHOẢNG LẶNG giữa hai lần đọc byte, không giới
+    hạn tổng thời gian một request. Log thực tế có lượt gọi kéo 2 giờ 16 phút rồi
+    mới báo "The read operation timed out" — 18 lượt như vậy ngốn 10 tiếng, bằng
+    77% thời gian cả đợt chạy. Muốn chặn tổng thời gian thì phải tự đặt hạn.
+
+    Thread quá hạn bị BỎ LẠI (daemon, sẽ tự kết thúc khi socket chết) — chấp nhận
+    rò một thread còn hơn treo cả đợt.
+    """
+    box: dict = {}
+
+    def _run():
+        try:
+            box["value"] = fn()
+        except BaseException as e:      # noqa: BLE001 - chuyển nguyên lỗi về luồng gọi
+            box["error"] = e
+
+    th = threading.Thread(target=_run, daemon=True, name="hoso-api-call")
+    th.start()
+    th.join(seconds)
+    if th.is_alive():
+        raise TimeoutError(f"{what}: quá {seconds:.0f}s không phản hồi — bỏ lượt này")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
 
 # ---- Kết quả phân loại 1 trang ----
 @dataclass
@@ -142,7 +179,8 @@ class GeminiClassifier:
     def __init__(self, model: str, categories: list[dict],
                  api_keys: list[str] | None = None, media_resolution: str = "medium",
                  rules: list[str] | None = None, request_timeout: float = 180.0,
-                 file_wait_timeout: float = 180.0, max_keys_per_call: int = 2):
+                 file_wait_timeout: float = 180.0, max_call_seconds: float = 420.0,
+                 key_budget_seconds: float = 900.0):
         from google import genai  # import trễ để provider khác không cần SDK này
 
         # Nếu không truyền danh sách key, tìm từ môi trường hoặc key đơn
@@ -176,10 +214,13 @@ class GeminiClassifier:
         self.model = model
         self.media_resolution = media_resolution
         self.file_wait_timeout = float(file_wait_timeout)
-        # Mỗi key hỏng là thêm một lượt upload + generate cho CÙNG file (có thể
-        # 20MB). Với 5 key thì một file hỏng ngốn tới 5 lượt, nhân tiếp với retry
-        # vòng ngoài -> tải API bùng nổ. Chặn ở 2 key/lần là đủ để đổi tài khoản.
-        self.max_keys_per_call = max(1, int(max_keys_per_call))
+        # Trần thời gian thực cho MỘT lượt gọi. Đo trên log thật: 100% lượt thành
+        # công xong dưới 285s, nên 420s vừa dư an toàn vừa cắt được các lần treo hàng giờ.
+        self.max_call_seconds = float(max_call_seconds)
+        # Ngân sách tổng để xoay vòng key cho MỘT file. Lỗi "hết credit" trả về
+        # trong tích tắc nên vẫn kịp thử hết 5 key; còn lỗi treo thì dừng sớm.
+        self.key_budget_seconds = float(key_budget_seconds)
+        self._dead_keys: set[int] = set()
         self.prompt = build_prompt(categories, rules)
         self.valid_categories = {c["key"] for c in categories} | {"khong_thuoc"}
 
@@ -213,67 +254,89 @@ class GeminiClassifier:
             raise RuntimeError("File upload lên Gemini bị lỗi xử lý (FAILED).")
         return uploaded
 
-    def classify(self, pdf_path: str) -> ClassifyResult:
+    def _classify_once(self, idx: int, pdf_path: str) -> ClassifyResult:
+        """Một lượt trọn vẹn với MỘT key: upload → gọi model → parse."""
         types = self._genai.types
         n_keys = len(self.clients)
-        n_try = min(n_keys, self.max_keys_per_call)
-        last_error: Exception | None = None
+        client = self.clients[idx]
+        uploaded = self._upload(client, pdf_path)
 
-        for attempt in range(n_try):
-            idx = (self.current_idx + attempt) % n_keys
-            client = self.clients[idx]
-
+        try:
+            cfg_kwargs = dict(
+                temperature=0,
+                response_mime_type="application/json",
+                response_schema=list[_PageClass],
+                # Hồ sơ dài (>90 trang) sinh JSON lớn; nếu không nới trần
+                # output, response bị CẮT CỤT → thiếu nhãn các trang cuối.
+                max_output_tokens=int(os.environ.get("HOSO_MAX_OUTPUT_TOKENS", "65000")),
+            )
             try:
-                uploaded = self._upload(client, pdf_path)
+                cfg = types.GenerateContentConfig(
+                    media_resolution=f"MEDIA_RESOLUTION_{self.media_resolution.upper()}",
+                    **cfg_kwargs,
+                )
+            except (TypeError, ValueError):
+                cfg = types.GenerateContentConfig(**cfg_kwargs)
 
-                try:
-                    cfg_kwargs = dict(
-                        temperature=0,
-                        response_mime_type="application/json",
-                        response_schema=list[_PageClass],
-                        # Hồ sơ dài (>90 trang) sinh JSON lớn; nếu không nới trần
-                        # output, response bị CẮT CỤT → thiếu nhãn các trang cuối.
-                        max_output_tokens=int(os.environ.get("HOSO_MAX_OUTPUT_TOKENS", "65000")),
-                    )
-                    try:
-                        cfg = types.GenerateContentConfig(
-                            media_resolution=f"MEDIA_RESOLUTION_{self.media_resolution.upper()}",
-                            **cfg_kwargs,
-                        )
-                    except (TypeError, ValueError):
-                        cfg = types.GenerateContentConfig(**cfg_kwargs)
+            resp = client.models.generate_content(
+                model=self.model,
+                contents=[uploaded, self.prompt],
+                config=cfg,
+            )
+        finally:
+            try:
+                client.files.delete(name=uploaded.name)
+            except Exception:
+                pass
 
-                    resp = client.models.generate_content(
-                        model=self.model,
-                        contents=[uploaded, self.prompt],
-                        config=cfg,
-                    )
-                finally:
-                    try:
-                        client.files.delete(name=uploaded.name)
-                    except Exception:
-                        pass
+        labels = self._parse(resp)
+        um = getattr(resp, "usage_metadata", None)
+        pt = int(getattr(um, "prompt_token_count", 0) or 0)
+        ot = int(getattr(um, "candidates_token_count", 0) or 0)
+        tt = int(getattr(um, "total_token_count", 0) or (pt + ot))
+        provider_str = "gemini" if n_keys == 1 else f"gemini (Key #{idx+1})"
+        return ClassifyResult(labels=labels, prompt_tokens=pt, output_tokens=ot,
+                              total_tokens=tt, provider_used=provider_str)
 
-                # Lưu lại index của key chạy thành công
-                self.current_idx = idx
-                labels = self._parse(resp)
-                um = getattr(resp, "usage_metadata", None)
-                pt = int(getattr(um, "prompt_token_count", 0) or 0)
-                ot = int(getattr(um, "candidates_token_count", 0) or 0)
-                tt = int(getattr(um, "total_token_count", 0) or (pt + ot))
-                
-                provider_str = "gemini" if n_keys == 1 else f"gemini (Key #{idx+1})"
-                return ClassifyResult(labels=labels, prompt_tokens=pt, output_tokens=ot,
-                                      total_tokens=tt, provider_used=provider_str)
+    def classify(self, pdf_path: str) -> ClassifyResult:
+        n_keys = len(self.clients)
+        name = os.path.basename(pdf_path)
+        last_error: Exception | None = None
+        started = time.monotonic()
+
+        for offset in range(n_keys):
+            idx = (self.current_idx + offset) % n_keys
+            if idx in self._dead_keys:            # key hết tiền/sai — đừng phí lượt gọi
+                continue
+            try:
+                result = _with_deadline(
+                    lambda: self._classify_once(idx, pdf_path),
+                    self.max_call_seconds, f"Gọi model cho {name} (Key #{idx+1})")
+                self.current_idx = idx            # nhớ key vừa chạy được
+                return result
             except Exception as e:
                 last_error = e
-                if attempt == n_try - 1:      # hết số key được phép thử cho lượt này
+                msg = str(e)
+                if _is_dead_key(msg):
+                    # Hỏng vĩnh viễn (hết credit / key sai): loại hẳn, và vì lỗi
+                    # kiểu này trả về trong tích tắc nên cứ thử tiếp key khác.
+                    self._dead_keys.add(idx)
+                    log.warning("API Key #%d HỎNG VĨNH VIỄN (%s) — loại khỏi các lượt sau",
+                                idx + 1, msg[:110])
+                    continue
+                # Lỗi đắt (treo, timeout): chỉ đổi key khi còn ngân sách thời gian,
+                # đừng để một file ngốn hết buổi vì thử lần lượt cả 5 key.
+                if time.monotonic() - started > self.key_budget_seconds:
+                    log.warning("%s: hết ngân sách %.0fs cho việc xoay key — dừng lượt này",
+                                name, self.key_budget_seconds)
                     raise
-                log.warning("API Key #%d lỗi (%s) — thử Key #%d (%d/%d key mỗi lượt)...",
-                            idx + 1, str(e)[:120], ((idx + 1) % n_keys) + 1,
-                            n_try, n_keys)
+                log.warning("API Key #%d lỗi (%s) — thử key kế...", idx + 1, msg[:110])
 
-        raise last_error if last_error else RuntimeError("Không gọi được Gemini")
+        if last_error:
+            raise last_error
+        raise RuntimeError(
+            f"Cả {n_keys} API key đều đã hỏng (hết credit hoặc sai key). "
+            "Vào Google AI Studio nạp lại credit, hoặc thay key ở ⚙️ Cài đặt.")
 
     def _parse(self, resp) -> list[PageLabel]:
         raw = getattr(resp, "parsed", None)
@@ -646,7 +709,8 @@ def _make_one_classifier(model: str, keys: list[str], config: dict) -> Classifie
         media_resolution=config.get("media_resolution", "medium"), rules=rules,
         request_timeout=float(config.get("request_timeout_sec", 180)),
         file_wait_timeout=float(config.get("file_wait_timeout_sec", 180)),
-        max_keys_per_call=int(config.get("max_keys_per_call", 2)))
+        max_call_seconds=float(config.get("max_call_seconds", 420)),
+        key_budget_seconds=float(config.get("key_budget_seconds", 900)))
 
 
 def _make_classifier_from_specs(config: dict, key_specs: list[dict]) -> Classifier:
@@ -719,7 +783,8 @@ def make_classifier(config: dict) -> Classifier:
             rules=config.get("rules"),
             request_timeout=float(config.get("request_timeout_sec", 180)),
             file_wait_timeout=float(config.get("file_wait_timeout_sec", 180)),
-            max_keys_per_call=int(config.get("max_keys_per_call", 2)),
+            max_call_seconds=float(config.get("max_call_seconds", 420)),
+            key_budget_seconds=float(config.get("key_budget_seconds", 900)),
         )
     elif provider == "openai":
         primary = OpenAIClassifier(
@@ -753,7 +818,8 @@ def make_classifier(config: dict) -> Classifier:
             rules=config.get("rules"),
             request_timeout=float(config.get("request_timeout_sec", 180)),
             file_wait_timeout=float(config.get("file_wait_timeout_sec", 180)),
-            max_keys_per_call=int(config.get("max_keys_per_call", 2)),
+            max_call_seconds=float(config.get("max_call_seconds", 420)),
+            key_budget_seconds=float(config.get("key_budget_seconds", 900)),
         )
         return FallbackClassifier(
             primary=primary,

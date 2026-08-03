@@ -61,11 +61,16 @@ max_retries: 3                # số lần thử lại khi gọi API lỗi TẠM
 # ---- Chống treo (đừng để 0 / bỏ trống) ----
 # Không đặt timeout thì SDK Google chờ VÔ HẠN: một socket chết là treo cả batch
 # mà không ném lỗi nào, nên retry ở trên không bao giờ chạy.
-request_timeout_sec: 180      # trần cho MỖI request tới API (upload / generate)
+request_timeout_sec: 180      # timeout socket của SDK (chỉ chặn khoảng lặng giữa các byte)
 file_wait_timeout_sec: 180    # trần chờ Gemini xử lý xong file vừa upload
-# Mỗi key hỏng = thêm 1 lượt upload + generate cho CÙNG file (có thể 20MB).
-# Có 5 key mà không chặn thì 1 file hỏng ngốn 5 lượt, nhân tiếp với max_retries.
-max_keys_per_call: 2          # số API key thử tối đa trong 1 lần phân loại
+# TRẦN THỜI GIAN THỰC cho 1 lượt gọi model — cái duy nhất thật sự chặn được treo.
+# Timeout socket ở trên KHÔNG chặn tổng thời gian: log đợt 03/08 có lượt gọi kéo
+# 2h16m rồi mới báo "read operation timed out". Đo trên 44 lượt THÀNH CÔNG:
+# trung vị 67s, p95 107s, lâu nhất 284s -> 420s là dư an toàn.
+max_call_seconds: 420
+# Ngân sách tổng để xoay vòng key cho MỘT file. Lỗi "hết credit" trả về tức thì
+# nên vẫn kịp thử hết mọi key; còn lỗi treo thì dừng sớm, không ngốn cả buổi.
+key_budget_seconds: 900
 
 # ---- Quy tắc nghiệp vụ (nhồi vào prompt; sửa ở đây, không cần đụng code) ----
 rules:
