@@ -66,9 +66,13 @@ class FolderResult:
     classified_pages: int = 0                # số trang được gán loại (khác khong_thuoc)
     low_conf_pages: int = 0
     prompt_tokens: int = 0                   # token THẬT từ API (đầu vào)
-    output_tokens: int = 0                   # token THẬT từ API (đầu ra)
+    output_tokens: int = 0                   # token THẬT từ API (đầu ra, ĐÃ gộp thinking)
+    thinking_tokens: int = 0                 # phần "suy nghĩ" của model suy luận
     total_tokens: int = 0
-    real_cost: float = 0.0                   # chi phí thực = token thật × đơn giá (config)
+    # KHÔNG quy ra tiền ở đây nữa: token của các lượt gọi HỎNG (timeout/429) không
+    # bao giờ về tới ta, nên mọi con số tiền tự tính đều là mức SÀN, dễ gây hiểu
+    # nhầm. Số tiền đúng chỉ có ở Google AI Studio → Usage.
+    failed_calls: int = 0                    # số lượt gọi model hỏng (token KHÔNG đếm được)
     error: str = ""
 
 
@@ -108,9 +112,15 @@ def classify_folder(folder: str, config: dict,
         if progress is not None:
             progress(fi + 1, len(pdfs), name, stage)
 
+    # Bộ đếm lượt gọi hỏng nằm trên classifier (nếu có) — token của các lượt đó
+    # không bao giờ về tới ta, nên phải báo riêng thay vì coi như bằng 0.
+    _clf = getattr(classify, "classifier", None)
+    failed_at_start = getattr(_clf, "failed_calls", 0)
+
     entries: list[dict] = []
-    usage = {"prompt_tokens": 0, "output_tokens": 0, "total_tokens": 0,
-             "n_calls": 0, "model": config.get("model", "")}
+    usage = {"prompt_tokens": 0, "output_tokens": 0, "thinking_tokens": 0,
+             "total_tokens": 0, "n_calls": 0, "failed_calls": 0,
+             "models": {}, "model": config.get("model", "")}
     for fi, pdf in enumerate(pdfs):
         name = os.path.basename(pdf)
         # Xoay các trang về ĐÚNG CHIỀU trước khi gửi model: trang lộn ngược khiến
@@ -153,8 +163,15 @@ def classify_folder(folder: str, config: dict,
                                 rotation=rot))
         usage["prompt_tokens"] += result.prompt_tokens
         usage["output_tokens"] += result.output_tokens
+        usage["thinking_tokens"] += result.thinking_tokens
         usage["total_tokens"] += result.total_tokens
         usage["n_calls"] += 1
+        # Ghi model THẬT SỰ đã chạy: chế độ có chuỗi fallback nên model dùng thực
+        # tế có thể khác hẳn `config['model']` — trước đây chỉ lưu cái sau, khiến
+        # không đối chiếu được token với bảng giá của model tương ứng.
+        m = result.model_used or "?"
+        usage["models"][m] = usage["models"].get(m, 0) + result.total_tokens
+    usage["failed_calls"] = getattr(_clf, "failed_calls", 0) - failed_at_start
     out_dir = os.path.join(folder, out_subdir)
     os.makedirs(out_dir, exist_ok=True)
     write_index(os.path.join(out_dir, INDEX_NAME), entries)
@@ -233,8 +250,9 @@ def assemble_from_index(folder: str, config: dict, entries: list[dict],
     if usage:
         res.prompt_tokens = int(usage.get("prompt_tokens", 0))
         res.output_tokens = int(usage.get("output_tokens", 0))
+        res.thinking_tokens = int(usage.get("thinking_tokens", 0))
         res.total_tokens = int(usage.get("total_tokens", 0))
-        res.real_cost = real_cost(usage, config)
+        res.failed_calls = int(usage.get("failed_calls", 0))
 
     res.status = "flagged" if res.reasons else "ok"
     return res
@@ -247,14 +265,6 @@ def read_usage(folder: str, config: dict) -> dict | None:
         with open(p, encoding="utf-8") as f:
             return json.load(f)
     return None
-
-
-def real_cost(usage: dict, config: dict) -> float:
-    """Chi phí thực = token thật × đơn giá (USD/1 triệu token) trong config."""
-    p_in = float(config.get("price_input_per_mtok", 0.30))
-    p_out = float(config.get("price_output_per_mtok", 2.50))
-    return usage.get("prompt_tokens", 0) / 1e6 * p_in \
-        + usage.get("output_tokens", 0) / 1e6 * p_out
 
 
 def process_folder(folder: str, config: dict,

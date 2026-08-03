@@ -73,12 +73,19 @@ class PageLabel:
 
 @dataclass
 class ClassifyResult:
-    """Nhãn các trang + SỐ TOKEN THẬT mà API báo về (để tính chi phí chính xác)."""
+    """Nhãn các trang + SỐ TOKEN THẬT mà API báo về.
+
+    `output_tokens` ĐÃ GỘP token suy nghĩ (thinking): model dạng suy luận trả
+    `thoughts_token_count` tách riêng với `candidates_token_count`, và nó VẪN bị
+    tính tiền như output. Trước đây chỉ đọc candidates nên số liệu hụt hẳn phần này.
+    """
     labels: list[PageLabel]
     prompt_tokens: int = 0
-    output_tokens: int = 0
+    output_tokens: int = 0      # = candidates + thinking
+    thinking_tokens: int = 0    # tách riêng để thấy model "nghĩ" tốn bao nhiêu
     total_tokens: int = 0
     provider_used: str = ""   # "gemini" | "openai" | ... để log/UI biết ai làm
+    model_used: str = ""      # model THẬT SỰ chạy (chế độ có thể fallback sang model khác)
 
 
 class Classifier(Protocol):
@@ -221,6 +228,10 @@ class GeminiClassifier:
         # trong tích tắc nên vẫn kịp thử hết 5 key; còn lỗi treo thì dừng sớm.
         self.key_budget_seconds = float(key_budget_seconds)
         self._dead_keys: set[int] = set()
+        # Lượt gọi hỏng (timeout/429/lỗi mạng). Google VẪN có thể đã xử lý và tính
+        # tiền, nhưng usage_metadata không bao giờ về tới ta -> token không đếm được.
+        # Đếm số lượt để báo cáo nói rõ phần thiếu thay vì lặng lẽ coi như bằng 0.
+        self.failed_calls = 0
         self.prompt = build_prompt(categories, rules)
         self.valid_categories = {c["key"] for c in categories} | {"khong_thuoc"}
 
@@ -292,11 +303,16 @@ class GeminiClassifier:
         labels = self._parse(resp)
         um = getattr(resp, "usage_metadata", None)
         pt = int(getattr(um, "prompt_token_count", 0) or 0)
-        ot = int(getattr(um, "candidates_token_count", 0) or 0)
+        # Model suy luận trả token "nghĩ" ở trường RIÊNG, không nằm trong
+        # candidates_token_count — nhưng vẫn bị tính tiền như output. Bỏ sót
+        # trường này là lý do số liệu token/chi phí trước đây thấp hơn thực tế.
+        th = int(getattr(um, "thoughts_token_count", 0) or 0)
+        ot = int(getattr(um, "candidates_token_count", 0) or 0) + th
         tt = int(getattr(um, "total_token_count", 0) or (pt + ot))
         provider_str = "gemini" if n_keys == 1 else f"gemini (Key #{idx+1})"
         return ClassifyResult(labels=labels, prompt_tokens=pt, output_tokens=ot,
-                              total_tokens=tt, provider_used=provider_str)
+                              thinking_tokens=th, total_tokens=tt,
+                              provider_used=provider_str, model_used=self.model)
 
     def classify(self, pdf_path: str) -> ClassifyResult:
         n_keys = len(self.clients)
@@ -316,6 +332,7 @@ class GeminiClassifier:
                 return result
             except Exception as e:
                 last_error = e
+                self.failed_calls += 1
                 msg = str(e)
                 if _is_dead_key(msg):
                     # Hỏng vĩnh viễn (hết credit / key sai): loại hẳn, và vì lỗi
@@ -484,7 +501,8 @@ class OpenAIClassifier:
                 pname = (self.provider_name if len(self.api_keys) == 1
                          else f"{self.provider_name} (Key #{i + 1})")
                 return ClassifyResult(labels=labels, prompt_tokens=pt, output_tokens=ot,
-                                      total_tokens=pt + ot, provider_used=pname)
+                                      total_tokens=pt + ot, provider_used=pname,
+                                      model_used=self.model)
             except Exception as e:
                 last_error = e
                 if len(self.api_keys) > 1:
@@ -584,6 +602,10 @@ class ChainClassifier:
     def __init__(self, classifiers: list, labels: list[str] | None = None):
         self.classifiers = classifiers
         self.labels = labels or [getattr(c, "model", "?") for c in classifiers]
+
+    @property
+    def failed_calls(self) -> int:
+        return sum(getattr(c, "failed_calls", 0) for c in self.classifiers)
 
     def classify(self, pdf_path: str) -> ClassifyResult:
         import logging

@@ -432,9 +432,7 @@ def setup_logging() -> str:
 
 
 # ---------- Báo cáo tổng ----------
-SUMMARY_COLS = ["folder", "status", "sample_check", "total_pages", "classified_pages",
-                "low_conf", "missing", "est_cost_usd", "real_tokens", "real_cost_usd",
-                "reasons"]
+from run import SUMMARY_COLS  # noqa: E402  (dùng chung schema với CLI)
 
 
 def upsert_summary(input_root: str, res, cfg: dict):
@@ -445,7 +443,7 @@ def upsert_summary(input_root: str, res, cfg: dict):
     """
     import csv
 
-    from run import est_cost
+    from run import est_tokens
 
     review_dir = os.path.join(input_root, "_review")
     os.makedirs(review_dir, exist_ok=True)
@@ -461,13 +459,17 @@ def upsert_summary(input_root: str, res, cfg: dict):
         "folder": res.prefix, "status": res.status, "sample_check": "",
         "total_pages": str(res.total_pages), "classified_pages": str(res.classified_pages),
         "low_conf": str(res.low_conf_pages), "missing": ", ".join(res.categories_missing),
-        "est_cost_usd": f"{est_cost(res.total_pages, cfg):.4f}",
-        "real_tokens": str(res.total_tokens), "real_cost_usd": f"{res.real_cost:.4f}",
+        "est_tokens": str(est_tokens(res.total_pages, cfg)),
+        "real_tokens": str(res.total_tokens),
+        "thinking_tokens": str(res.thinking_tokens),
+        "failed_calls": str(res.failed_calls),
         "reasons": " | ".join(res.reasons) or res.error,
     })
     rows.sort(key=lambda r: r.get("folder", ""))
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=SUMMARY_COLS, extrasaction="ignore")
+        # restval: file summary.csv cũ có bộ cột khác (est_cost_usd/real_cost_usd),
+        # thiếu cột mới sẽ để trống thay vì ném lỗi.
+        w = csv.DictWriter(f, fieldnames=SUMMARY_COLS, extrasaction="ignore", restval="")
         w.writeheader()
         w.writerows(rows)
 
@@ -489,7 +491,7 @@ def start_batch(folders: list[str], force: bool):
     st.session_state[BATCH] = {
         "queue": list(folders), "total": len(folders), "force": force,
         "ok": 0, "flagged": 0, "errors": 0, "skipped": 0,
-        "pages": 0, "tokens": 0, "cost": 0.0,
+        "pages": 0, "tokens": 0, "thinking": 0, "failed_calls": 0,
         "log": [], "attempts": {}, "durations": [],
         "running": True, "started": time.time(),
     }
@@ -644,8 +646,14 @@ def render_batch_progress(b: dict):
         if b["queue"]:
             bits.append(f"còn khoảng **{fmt_dur(avg * len(b['queue']))}**")
     if b["tokens"]:
-        bits.append(f"token **{b['tokens']:,}** · chi phí **${b['cost']:.4f}**")
+        bits.append(f"token đo được **{b['tokens']:,}**"
+                    + (f" (gồm **{b['thinking']:,}** token suy nghĩ)" if b["thinking"] else ""))
     st.caption(" · ".join(bits))
+    if b.get("failed_calls"):
+        # Nói thẳng phần KHÔNG đo được, thay vì im lặng để con số trông như đủ.
+        st.caption(f"⚠️ {b['failed_calls']} lượt gọi model hỏng — token của các lượt này "
+                   "**không đếm được** nhưng Google vẫn có thể đã tính tiền. "
+                   "Số tiền thật xem ở Google AI Studio → Usage.")
 
     if b["log"]:
         icons = {"ok": "✅", "flagged": "⚠️", "error": "❌", "skip": "⏭️"}
@@ -729,7 +737,8 @@ if batch_running:
             upsert_summary(input_root, res, cfg)
             batch["pages"] += res.total_pages
             batch["tokens"] += res.total_tokens
-            batch["cost"] += res.real_cost
+            batch["thinking"] += res.thinking_tokens
+            batch["failed_calls"] += res.failed_calls
             if res.status == "error":
                 batch["errors"] += 1
                 batch["log"].append(("error", fname, res.error, dt))
@@ -890,8 +899,10 @@ with tab2:
             upsert_summary(input_root, res, cfg)
             st.success(f"Đã tạo {len(res.outputs)} file ({res.classified_pages}/{res.total_pages} trang).")
             if res.total_tokens:
-                st.caption(f"💰 Token thật: {res.total_tokens:,} · Chi phí thực ≈ ${res.real_cost:.4f} "
-                           "(số chính xác xem ở Google AI Studio → Usage)")
+                st.caption(f"Token đo được: {res.total_tokens:,}"
+                           + (f" (gồm {res.thinking_tokens:,} token suy nghĩ)"
+                              if res.thinking_tokens else "")
+                           + " · số tiền xem ở Google AI Studio → Usage")
             if res.reasons:
                 st.warning("Lưu ý: " + "; ".join(res.reasons))
             for o in res.outputs:
@@ -905,8 +916,9 @@ COLS_VN = {
     "folder": "Folder", "status": "Trạng thái", "sample_check": "Kiểm mẫu",
     "total_pages": "Tổng trang", "classified_pages": "Đã xếp loại",
     "low_conf": "Trang nghi ngờ", "missing": "Thiếu loại",
-    "est_cost_usd": "Ước tính ($)", "real_tokens": "Token thực",
-    "real_cost_usd": "Chi phí thực ($)", "reasons": "Lý do",
+    "est_tokens": "Token ước tính", "real_tokens": "Token đo được",
+    "thinking_tokens": "Token suy nghĩ", "failed_calls": "Lượt gọi hỏng",
+    "reasons": "Lý do",
 }
 STATUS_VN = {"ok": "✅ ok", "flagged": "⚠️ cần kiểm", "error": "❌ lỗi"}
 
@@ -926,19 +938,33 @@ with tab3:
         c3.metric("⚠️ Cần kiểm", n_flag)
         c4.metric("❌ Lỗi", n_err)
 
-        # Dự phóng chi phí từ token THẬT của các folder đã chạy.
-        if "real_cost_usd" in df.columns:
-            ran = pd.to_numeric(df["real_cost_usd"], errors="coerce").fillna(0)
+        # Dự phóng KHỐI LƯỢNG (token) từ các folder đã chạy — cố tình không quy ra
+        # tiền: token của lượt gọi hỏng không đếm được nên mọi số tiền tự tính đều
+        # là mức sàn. Tiền chỉ tra ở Google AI Studio → Usage.
+        if "real_tokens" in df.columns:
+            ran = pd.to_numeric(df["real_tokens"], errors="coerce").fillna(0)
             ran = ran[ran > 0]
             if not ran.empty:
                 avg = float(ran.mean())
-                tokens = int(pd.to_numeric(df.get("real_tokens", 0), errors="coerce").fillna(0).sum())
+                # df.get(col, 0) trả về SỐ khi thiếu cột (không phải Series) → .fillna
+                # nổ. File summary.csv của các lần chạy cũ chưa có 2 cột này.
+                def col_sum(name: str) -> int:
+                    if name not in df.columns:
+                        return 0
+                    return int(pd.to_numeric(df[name], errors="coerce").fillna(0).sum())
+
+                think, nfail = col_sum("thinking_tokens"), col_sum("failed_calls")
                 k1, k2 = st.columns([1, 2])
                 target = k1.number_input("Tổng folder mục tiêu", min_value=1,
                                          value=int(cfg.get("project_total_folders", 800)))
-                k2.success(f"💰 Đã chạy {len(ran)} folder · token thật {tokens:,} · "
-                           f"TB ${avg:.4f}/folder → **dự phóng {target} folder ≈ ${avg*target:.2f}**\n\n"
-                           "(số tiền chính xác xem Google AI Studio → Usage)")
+                k2.info(f"Đã chạy {len(ran)} folder · token đo được **{int(ran.sum()):,}**"
+                        + (f" (gồm {think:,} token suy nghĩ)" if think else "")
+                        + f" · TB {avg:,.0f}/folder → **dự phóng {target} folder ≈ "
+                          f"{avg*target:,.0f} token**")
+                if nfail:
+                    st.warning(f"⚠️ {nfail} lượt gọi model hỏng — token của các lượt này "
+                               "**không nằm trong** con số trên, nhưng Google vẫn có thể đã "
+                               "tính tiền. Số tiền thật: Google AI Studio → Usage.")
 
         mode = st.radio("Hiển thị", ["Chỉ folder cần chú ý", "Tất cả"], horizontal=True)
         view = df if mode == "Tất cả" else df[df["status"] != "ok"]

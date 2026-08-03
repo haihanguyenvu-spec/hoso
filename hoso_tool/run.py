@@ -27,10 +27,6 @@ from pipeline import FolderResult, process_folder
 
 # Ước tính token/trang theo media_resolution của Gemini (ảnh scan).
 _TOK_PER_PAGE = {"low": 280, "medium": 560, "high": 1120}
-# Giá input USD / 1 triệu token (ước tính 6/2026; chỉnh trong config nếu cần).
-_PRICE_INPUT = {
-    "flash-lite": 0.10, "flash": 0.30, "pro": 1.25,
-}
 log = logging.getLogger("hoso")
 
 
@@ -43,19 +39,14 @@ def load_config(path: str, overrides: dict) -> dict:
     return cfg
 
 
-def price_per_mtok(model: str, cfg: dict) -> float:
-    if cfg.get("price_per_mtok_input") is not None:
-        return float(cfg["price_per_mtok_input"])
-    m = model.lower()
-    for tag, price in _PRICE_INPUT.items():
-        if tag in m:
-            return price
-    return 0.30  # mặc định ~ Flash
+def est_tokens(total_pages: int, cfg: dict) -> int:
+    """Ước tính SỐ TOKEN đầu vào theo số trang (không quy ra tiền).
 
-
-def est_cost(total_pages: int, cfg: dict) -> float:
-    tok = total_pages * _TOK_PER_PAGE.get(cfg.get("media_resolution", "medium"), 560)
-    return tok / 1e6 * price_per_mtok(cfg["model"], cfg)
+    Tool cố tình KHÔNG tự tính tiền nữa: token của các lượt gọi hỏng
+    (timeout/429) không bao giờ về tới ta, nên mọi con số tiền tự tính đều là mức
+    sàn và gây hiểu nhầm. Số tiền đúng chỉ có ở Google AI Studio → Usage.
+    """
+    return total_pages * _TOK_PER_PAGE.get(cfg.get("media_resolution", "medium"), 560)
 
 
 def discover_folders(input_root: str, output_subdir: str) -> list[str]:
@@ -97,6 +88,7 @@ def make_retrying_classify(classifier, max_retries: int, notify=None):
                            f"sau {sleep_time:.0f}s")
                 time.sleep(sleep_time)
                 delay *= 2.0
+    _classify.classifier = classifier   # để pipeline đọc được bộ đếm lượt gọi hỏng
     return _classify
 
 
@@ -196,6 +188,11 @@ def main():
     _print_aggregate(results, cfg, args.dry_run)
 
 
+SUMMARY_COLS = ["folder", "status", "sample_check", "total_pages", "classified_pages",
+                "low_conf", "missing", "est_tokens", "real_tokens", "thinking_tokens",
+                "failed_calls", "reasons"]
+
+
 def write_summary(path: str, results: list[FolderResult], cfg: dict):
     sample_rate = float(cfg.get("sample_rate", 0.05))
     ok_idx = [i for i, r in enumerate(results) if r.status == "ok"]
@@ -205,15 +202,13 @@ def write_summary(path: str, results: list[FolderResult], cfg: dict):
     results = sorted(results, key=lambda r: r.prefix)
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["folder", "status", "sample_check", "total_pages", "classified_pages",
-                    "low_conf", "missing", "est_cost_usd", "real_tokens", "real_cost_usd",
-                    "reasons"])
+        w.writerow(SUMMARY_COLS)
         for r in results:
             w.writerow([
                 r.prefix, r.status, "yes" if id(r) in sampled_folders else "",
                 r.total_pages, r.classified_pages, r.low_conf_pages,
-                ", ".join(r.categories_missing), f"{est_cost(r.total_pages, cfg):.4f}",
-                r.total_tokens, f"{r.real_cost:.4f}",
+                ", ".join(r.categories_missing), est_tokens(r.total_pages, cfg),
+                r.total_tokens, r.thinking_tokens, r.failed_calls,
                 " | ".join(r.reasons) or r.error,
             ])
     log.info("Đã ghi summary: %s", path)
@@ -223,26 +218,29 @@ def _print_aggregate(results: list[FolderResult], cfg: dict, dry_run: bool):
     n = len(results)
     by = lambda s: sum(1 for r in results if r.status == s)
     pages = sum(r.total_pages for r in results)
-    est = sum(est_cost(r.total_pages, cfg) for r in results)
     real_tok = sum(r.total_tokens for r in results)
-    real = sum(r.real_cost for r in results)
+    think_tok = sum(r.thinking_tokens for r in results)
+    n_failed = sum(r.failed_calls for r in results)
     log.info("==== TỔNG KẾT ====")
     log.info("Folder: %d (ok=%d, flagged=%d, error=%d)", n, by("ok"), by("flagged"), by("error"))
-    log.info("Tổng trang: %d | Ước tính trước: ~$%.2f (%s)", pages, est, cfg.get("model"))
-    log.info("TOKEN THẬT: %s | CHI PHÍ THỰC: $%.4f (đơn giá in=$%.2f out=$%.2f /1M)",
-             f"{real_tok:,}", real,
-             float(cfg.get("price_input_per_mtok", 0.30)),
-             float(cfg.get("price_output_per_mtok", 2.50)))
-    log.info("(Số tiền chính xác cuối cùng xem ở Google AI Studio → Usage.)")
+    log.info("Tổng trang: %d | Ước tính trước: ~%s token", pages,
+             f"{sum(est_tokens(r.total_pages, cfg) for r in results):,}")
+    log.info("TOKEN THẬT ĐO ĐƯỢC: %s (trong đó %s token suy nghĩ)",
+             f"{real_tok:,}", f"{think_tok:,}")
+    if n_failed:
+        log.warning("CÓ %d LƯỢT GỌI HỎNG — token của các lượt này KHÔNG đếm được "
+                    "nhưng Google vẫn có thể đã tính tiền.", n_failed)
+    log.info("SỐ TIỀN THẬT: xem Google AI Studio → Usage (tool không tự quy ra tiền).")
 
-    # Dự phóng cho toàn bộ dự án dựa trên các folder vừa chạy thật.
+    # Dự phóng khối lượng cho toàn bộ dự án (theo token, không theo tiền).
     ran = [r for r in results if r.total_tokens > 0]
     target = int(cfg.get("project_total_folders", 0) or 0)
     if ran and target:
-        avg_cost = real / len(ran)
+        avg_tok = real_tok / len(ran)
         avg_pages = sum(r.total_pages for r in ran) / len(ran)
-        log.info("DỰ PHÓNG: TB $%.4f/folder (~%.0f trang/folder, đo trên %d folder) "
-                 "→ %d folder ≈ $%.2f", avg_cost, avg_pages, len(ran), target, avg_cost * target)
+        log.info("DỰ PHÓNG: TB %s token/folder (~%.0f trang/folder, đo trên %d folder) "
+                 "→ %d folder ≈ %s token", f"{avg_tok:,.0f}", avg_pages, len(ran),
+                 target, f"{avg_tok * target:,.0f}")
     if dry_run:
         log.info("(dry-run: chưa ghép file. Bỏ --dry-run để xuất PDF.)")
 

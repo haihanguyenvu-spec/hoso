@@ -20,7 +20,7 @@ media_resolution: "medium"    # low | medium | high
 default_mode: "cham"          # nhanh | cham  (mặc định: chậm)
 modes:
   # Cả 2 chế độ: Gemini CHỦ ĐẠO → Qwen DỰ PHÒNG. Khác nhau ở phiên bản Gemini.
-  nhanh: ["gemini-3.5-flash", "qwen3.7-plus"]   # nhanh: Gemini 3.5 → dự phòng Qwen 3.7-plus
+  nhanh: ["gemini-3.6-flash", "qwen3.7-plus"]   # nhanh: Gemini 3.6 → dự phòng Qwen 3.7-plus
   cham:  ["gemini-2.5-flash", "qwen3.6-flash"]  # chậm:  Gemini 2.5 → dự phòng Qwen 3.6-flash
 # Model mặc định của mỗi nhà cung cấp — dùng làm FALLBACK khi provider có key nhưng
 # không nằm trong chế độ (vd chế độ Chậm cần Qwen nhưng chỉ có key Gemini → vẫn chạy Gemini).
@@ -29,7 +29,7 @@ provider_default_model:
   qwen:   "qwen3.6-flash"
   openai: "gpt-4o-mini"
 # Danh sách model cho ô chọn khi nhập TỪNG API key trên UI.
-key_model_options: ["gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.0-flash", "qwen3.7-plus", "qwen3.6-flash"]
+key_model_options: ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.0-flash", "qwen3.7-plus", "qwen3.6-flash"]
 # Endpoint Qwen (DashScope, tương thích OpenAI). Bản quốc tế: dashscope-intl; TQ đại lục: bỏ '-intl'.
 # LƯU Ý: sửa ID model qwen ở trên cho khớp ID thật của tài khoản DashScope nếu cần.
 qwen_base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
@@ -44,17 +44,18 @@ fallback:
   # Key đọc từ env GEMINI_API_KEY_2, hoặc file .gemini_key_2, hoặc nhập trong UI
 
 
-# ---- Đơn giá để tính CHI PHÍ THỰC từ token API trả về (USD / 1 triệu token) ----
-# Sửa cho khớp giá tài khoản bạn (xem Google AI Studio). Mặc định ~ Gemini 2.5 Flash.
-price_input_per_mtok: 0.30
-price_output_per_mtok: 2.50
+# ---- KHÔNG còn tự quy token ra tiền ----
+# Tool cố tình bỏ phần tính tiền. Lý do: token của các lượt gọi HỎNG (timeout,
+# 429) không bao giờ về tới client, nên mọi con số tự tính đều là mức SÀN và gây
+# hiểu nhầm là đã tiêu ít. Ngoài ra chế độ chạy có thể fallback sang model khác
+# với đơn giá khác. SỐ TIỀN ĐÚNG: Google AI Studio → Usage.
 
 # ---- QA ----
 confidence_threshold: 0.75    # trang có confidence < ngưỡng -> đưa vào danh sách review
 sample_rate: 0.05             # tỉ lệ folder "ok" được đánh dấu để soi tay (~5%)
 
 # ---- Batch ----
-project_total_folders: 800    # tổng folder dự định chạy -> dùng để DỰ PHÓNG chi phí
+project_total_folders: 800    # tổng folder dự định chạy -> dùng để DỰ PHÓNG khối lượng token
 workers: 4                    # số folder xử lý song song
 max_retries: 3                # số lần thử lại khi gọi API lỗi TẠM THỜI (backoff luỹ thừa)
 
