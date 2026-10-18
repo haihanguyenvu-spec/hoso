@@ -78,6 +78,10 @@ def _ensure_tesseract() -> bool:
             "macOS: brew install tesseract · Ubuntu: apt install tesseract-ocr")
         return False
     pytesseract.pytesseract.tesseract_cmd = cmd
+    if os.name == "nt":
+        # pytesseract ghi ảnh tạm vào thư mục temp mặc định; với user Windows tên
+        # tiếng Việt, tesseract.exe không mở được đường dẫn có dấu → dùng temp ASCII.
+        tempfile.tempdir = get_safe_temp_dir()
     return True
 
 
@@ -237,9 +241,13 @@ def build_upright_pdf(src_pdf: str, progress=None) -> tuple[str, dict[int, int]]
         # chỉ còn "tmp0ubivrtc.pdf", không tra ngược ra hồ sơ nào.
         out_dir = tempfile.mkdtemp(prefix=ROT_TMP_PREFIX, dir=get_safe_temp_dir())
         out_pdf = os.path.join(out_dir, os.path.basename(src_pdf))
-        subprocess.run(["pdfunite", *rebuilt, out_pdf], check=True,
+        # poppler trên Windows không ghi được đường dẫn có dấu → ghép ra tên ASCII
+        # rồi để Python đổi sang tên gốc.
+        ascii_out = os.path.join(out_dir, "upright.pdf")
+        subprocess.run(["pdfunite", *rebuilt, ascii_out], check=True,
                        capture_output=True, encoding="utf-8", errors="ignore",
                        timeout=PROC_TIMEOUT)
+        os.replace(ascii_out, out_pdf)
         return out_pdf, rotations
     except Exception as e:
         logger.warning("Không tạo được bản PDF xoay đứng cho %s (%s) — gửi bản gốc.",

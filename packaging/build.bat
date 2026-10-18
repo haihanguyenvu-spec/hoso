@@ -2,7 +2,7 @@
 REM ============================================================
 REM  build.bat — đóng gói HoSoPDF thành bundle + installer (.exe)
 REM  CHẠY TRÊN WINDOWS. Mở "Command Prompt", cd vào thư mục packaging, gõ: build.bat
-REM  Cần: kết nối Internet (tải Python embeddable + poppler), và Inno Setup 6 (để ra .exe).
+REM  Cần: kết nối Internet (tải Python embeddable + poppler + Tesseract), và Inno Setup 6 (để ra .exe).
 REM ============================================================
 setlocal enabledelayedexpansion
 
@@ -14,6 +14,14 @@ set POPVER=24.08.0-0
 set POPZIP=Release-%POPVER%.zip
 set POPURL=https://github.com/oschwartz10612/poppler-windows/releases/download/v%POPVER%/%POPZIP%
 set GETPIP=https://bootstrap.pypa.io/get-pip.py
+set TESSVER=5.5.3
+set TESSEXE=tesseract-ocr-w64-setup-%TESSVER%.20260724.exe
+set TESSURL=https://github.com/tesseract-ocr/tesseract/releases/download/%TESSVER%/%TESSEXE%
+REM Bộ cài Tesseract KHÔNG kèm dữ liệu nhận dạng (nó tải lúc cài), nên tự tải eng + osd.
+set TESSDATAURL=https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0
+REM 7zr.exe (console 7-Zip độc lập) lấy 7z.exe đầy đủ từ bộ cài 7-Zip, để giải nén được bộ cài NSIS.
+set SZRURL=https://www.7-zip.org/a/7zr.exe
+set SZURL=https://www.7-zip.org/a/7z2501-x64.exe
 
 REM ---- Thư mục ----
 set HERE=%~dp0
@@ -50,6 +58,21 @@ for /d %%D in ("%DL%\poppler\poppler-*") do set POPSRC=%%D
 if not defined POPSRC ( echo Khong tim thay thu muc poppler sau giai nen & goto :err )
 robocopy "!POPSRC!\Library" "%OUT%\poppler\Library" /e /njh /njs /ndl /nc /ns /np >nul
 if errorlevel 8 goto :err
+
+echo === Tai Tesseract %TESSVER% (tu dong sua trang xoay / lon nguoc) ===
+REM Giai nen bo cai NSIS bang 7-Zip thay vi chay no: khong ghi registry, khong can admin.
+powershell -NoProfile -Command "Invoke-WebRequest -Uri '%SZRURL%' -OutFile '%DL%\7zr.exe'" || goto :err
+powershell -NoProfile -Command "Invoke-WebRequest -Uri '%SZURL%' -OutFile '%DL%\7z-setup.exe'" || goto :err
+"%DL%\7zr.exe" x -y -o"%DL%\7zip" "%DL%\7z-setup.exe" 7z.exe 7z.dll >nul || goto :err
+powershell -NoProfile -Command "Invoke-WebRequest -Uri '%TESSURL%' -OutFile '%DL%\%TESSEXE%'" || goto :err
+"%DL%\7zip\7z.exe" x -y -o"%OUT%\tesseract" "%DL%\%TESSEXE%" >nul || goto :err
+rmdir /s /q "%OUT%\tesseract\$PLUGINSDIR"
+for %%L in (eng osd) do (
+  powershell -NoProfile -Command "Invoke-WebRequest -Uri '%TESSDATAURL%/%%L.traineddata' -OutFile '%OUT%\tesseract\tessdata\%%L.traineddata'" || goto :err
+)
+REM Chay thu that: phai liet ke duoc osd, neu khong app se am tham TAT sua xoay.
+set TESSDATA_PREFIX=%OUT%\tesseract\tessdata
+"%OUT%\tesseract\tesseract.exe" --list-langs 2>&1 | findstr /b /c:"osd" >nul || ( echo Tesseract khong chay duoc hoac thieu osd.traineddata & goto :err )
 
 echo === Sao chep code app ===
 robocopy "%ROOT%\hoso_tool" "%OUT%\app\hoso_tool" /e /xd __pycache__ output /xf .gemini_key .gemini_key_2 key.py /njh /njs /ndl /nc /ns /np >nul

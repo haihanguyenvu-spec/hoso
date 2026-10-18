@@ -1,4 +1,4 @@
-; Inno Setup script cho HoSoPDF — tạo HoSoPDF_Setup.exe
+﻿; Inno Setup script cho HoSoPDF — tạo HoSoPDF_Setup.exe
 ; Nguồn: thư mục build\HoSoPDF do build.bat sinh ra (chạy build.bat TRƯỚC).
 ; Build: mở file này bằng Inno Setup rồi Compile, hoặc build.bat tự gọi ISCC.
 

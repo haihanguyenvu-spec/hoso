@@ -48,6 +48,23 @@ def key_path(name: str) -> str:
     return os.path.join(user_data_dir(), name)
 
 
+def read_last_root() -> str:
+    """Thư mục gốc dùng lần trước — người dùng không phải dán lại mỗi lần mở app."""
+    try:
+        with open(key_path("last_input_root.txt"), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def save_last_root(path: str):
+    try:
+        with open(key_path("last_input_root.txt"), "w", encoding="utf-8") as f:
+            f.write(path)
+    except OSError:
+        pass
+
+
 # ---------- Helpers ----------
 @st.cache_data
 def load_config() -> dict:
@@ -593,33 +610,47 @@ if st.session_state.settings_open:
 # --- Ô nhập thư mục gốc (trước tabs, dùng chung cho cả 3 tab) ---
 st.markdown("### 📁 Thư mục gốc chứa các folder hồ sơ")
 col_path, col_hint = st.columns([4, 1])
+if "root_default" not in st.session_state:
+    st.session_state.root_default = read_last_root() or cfg["input_root"]
 with col_path:
     input_root = st.text_input(
         "Đường dẫn thư mục gốc",
-        value=cfg["input_root"],
-        placeholder="/path/to/Cr8-3",
+        value=st.session_state.root_default,
+        placeholder=r"D:\Hồ sơ\Cr8-3" if os.name == "nt" else "/path/to/Cr8-3",
         help="Mỗi subfolder bên trong = 1 bộ hồ sơ. Nhập đường dẫn rồi nhấn Enter.",
         label_visibility="collapsed",
     )
 with col_hint:
     st.caption("Nhập xong nhấn Enter ↵")
+# "Copy as path" của Windows Explorer bọc đường dẫn trong ngoặc kép → bỏ đi.
+input_root = input_root.strip().strip('"').strip()
 
 if not input_root:
     st.warning("⚠️ Vui lòng nhập đường dẫn thư mục gốc.")
     st.stop()
 if not os.path.isdir(input_root):
     st.error(f"❌ Thư mục không tồn tại hoặc không truy cập được: `{input_root}`")
-    st.info("💡 Mở Finder → tìm thư mục Cr8-3 → kéo thả vào ô trên để lấy đường dẫn.  "
-            "Hoặc vào System Settings → Privacy & Security → Full Disk Access → bật Terminal.")
+    if os.name == "nt":
+        st.info("💡 Mở thư mục hồ sơ bằng **File Explorer** → bấm vào **thanh địa chỉ** phía trên "
+                "→ **Ctrl+C** → bấm vào ô trên → **Ctrl+V** → nhấn **Enter**.")
+    else:
+        st.info("💡 Mở Finder → tìm thư mục Cr8-3 → kéo thả vào ô trên để lấy đường dẫn.  "
+                "Hoặc vào System Settings → Privacy & Security → Full Disk Access → bật Terminal.")
     st.stop()
+if input_root != read_last_root():
+    save_last_root(input_root)
 
 folders, scan_error = discover(input_root, cfg)
 if scan_error:
     st.error(f"❌ Không đọc được nội dung thư mục gốc — `{scan_error}`")
-    st.info("💡 Thư mục tồn tại nhưng macOS chặn quyền liệt kê (rất hay gặp với "
-            "thư mục Google Drive). Mở **System Settings → Privacy & Security → "
-            "Full Disk Access**, bật cho Terminal (hoặc ứng dụng đang chạy tool), "
-            "rồi khởi động lại tool.")
+    if os.name == "nt":
+        st.info("💡 Tài khoản Windows đang dùng không có quyền đọc thư mục này. Chọn thư mục "
+                "khác, hoặc nhờ người quản trị máy cấp quyền rồi mở lại tool.")
+    else:
+        st.info("💡 Thư mục tồn tại nhưng macOS chặn quyền liệt kê (rất hay gặp với "
+                "thư mục Google Drive). Mở **System Settings → Privacy & Security → "
+                "Full Disk Access**, bật cho Terminal (hoặc ứng dụng đang chạy tool), "
+                "rồi khởi động lại tool.")
     st.stop()
 
 st.divider()
