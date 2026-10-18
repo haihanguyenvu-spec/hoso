@@ -34,6 +34,7 @@ Name: "desktopicon"; Description: "Tạo icon trên Desktop"; GroupDescription: 
 [Icons]
 Name: "{group}\{#AppName}";        Filename: "{app}\launch.vbs"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"
 Name: "{group}\Dừng {#AppName}";   Filename: "{app}\stop.vbs";   WorkingDir: "{app}"
+Name: "{group}\Hướng dẫn sử dụng"; Filename: "{app}\HuongDan.pdf"
 Name: "{group}\Gỡ cài đặt {#AppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}";  Filename: "{app}\launch.vbs"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"; Tasks: desktopicon
 

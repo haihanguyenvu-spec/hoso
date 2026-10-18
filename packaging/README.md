@@ -43,6 +43,10 @@ Kết quả:
    App nhớ thư mục này cho lần mở sau.
 5. Muốn tắt app nền: chạy **Dừng HoSoPDF** trong Start Menu (hoặc tắt máy).
 
+Tờ hướng dẫn dành cho người dùng (PDF, 5 trang, có ảnh từng bước) được cài kèm và mở được từ
+Start Menu → HoSoPDF → **Hướng dẫn sử dụng**. Có thể gửi riêng file `huongdan\HuongDan_HoSoPDF.pdf`
+cùng với `HoSoPDF_Setup.exe`.
+
 ## Cấu trúc bundle
 ```
 HoSoPDF/
@@ -52,6 +56,7 @@ HoSoPDF/
 ├── app/
 │   ├── hoso_tool/       code app (config input_root để trống)
 │   └── .streamlit/      config.toml (ẩn chrome Streamlit)
+├── HuongDan.pdf         tờ hướng dẫn cho người dùng (chép từ huongdan\HuongDan_HoSoPDF.pdf)
 ├── launch.vbs           đặt PATH (poppler, tesseract) + TESSDATA_PREFIX, chạy Streamlit ẩn console, mở browser
 └── stop.vbs             dừng đúng tiến trình python của bản cài này
 ```
@@ -62,6 +67,9 @@ HoSoPDF/
 - **Output** (6 file PDF, `_index.csv`, `.done`) ghi vào chính các folder căn hộ của người dùng,
   không đụng vào thư mục cài.
 - Đổi phiên bản Python/poppler/Tesseract: sửa `PYVER` / `POPVER` / `TESSVER` + `TESSEXE` đầu file `build.bat`.
+- **Sửa tờ hướng dẫn:** sửa `huongdan\huongdan.html` (ảnh trong `huongdan\img\`), rồi mở file đó bằng Chrome →
+  `Ctrl+P` → *Save as PDF* (khổ A4) và lưu đè `huongdan\HuongDan_HoSoPDF.pdf`. Ảnh chụp từ giao diện
+  ở phiên bản 1.1.x (dữ liệu mẫu) — nếu giao diện đổi nhiều thì chụp lại ảnh cho khớp.
 - `build.bat` và `*.vbs` phải giữ xuống dòng **CRLF** (đã ép bằng `.gitattributes`): `cmd.exe` đọc
   file `.bat` chỉ có LF có thể nhảy sai nhãn `goto`/`call`.
 - Nâng phiên bản app hiển thị trong installer: sửa `AppVersion` trong `installer.iss`.

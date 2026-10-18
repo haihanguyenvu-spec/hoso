@@ -1,5 +1,9 @@
 google-genai==2.8.0
 streamlit==1.58.0
+# Streamlit chỉ đòi starlette>=0.40 (không chặn bản 1.x) nên pip tự lấy bản mới nhất. Với
+# starlette 1.x, máy chủ Streamlit trả lỗi 500 khi phát ảnh (st.image) -> khung "Xem trang"
+# ở tab "Review & Sửa nhãn" bị vỡ. Ghim bản đã kiểm tra chạy đúng.
+starlette==0.52.1
 PyYAML==6.0.3
 # pandas đi kèm streamlit, ghim cho chắc:
 pandas==3.0.3

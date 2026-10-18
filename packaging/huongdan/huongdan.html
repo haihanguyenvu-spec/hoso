@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>HoSoPDF — Hướng dẫn sử dụng</title>
+<style>
+@font-face {
+  font-family: "Source Sans";
+  src: url("fonts/SourceSans-Upright.woff2") format("woff2");
+  font-weight: 200 900;
+}
+@page { size: A4; margin: 15mm 16mm 16mm; }
+:root {
+  --ink: #1f2937;
+  --muted: #5b6472;
+  --line: #d9dce1;
+  --soft: #f4f5f7;
+  --accent: #e11d48;
+  --ok: #15803d;
+  --warn-bg: #fff7e0;
+  --warn-line: #f2c94c;
+  --info-bg: #eef5ff;
+  --info-line: #9cc0f5;
+}
+* { box-sizing: border-box; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body {
+  margin: 0; color: var(--ink);
+  font: 400 11pt/1.45 "Source Sans", "DejaVu Sans", sans-serif;
+}
+h1 { font-size: 26pt; line-height: 1.15; margin: 0 0 4pt; letter-spacing: -.3pt; }
+.sub { color: var(--muted); font-size: 13pt; margin: 0 0 14pt; }
+h2.sec { font-size: 15pt; margin: 18pt 0 6pt; padding-bottom: 3pt; border-bottom: 2px solid var(--line); break-after: avoid; }
+p { margin: 0 0 6pt; }
+ol, ul { margin: 0 0 6pt; padding-left: 18pt; }
+li { margin-bottom: 3pt; }
+b, strong { font-weight: 700; }
+
+/* Từng bước */
+.step { margin: 0 0 14pt; break-inside: avoid; }
+.step > .head { break-after: avoid; }
+p, li { orphans: 2; widows: 2; }
+.step > .head { display: flex; align-items: center; gap: 10pt; margin-bottom: 6pt; }
+.num {
+  flex: none; width: 28pt; height: 28pt; border-radius: 50%;
+  background: var(--accent); color: #fff; font-weight: 700; font-size: 15pt;
+  display: flex; align-items: center; justify-content: center;
+}
+.step h2 { margin: 0; font-size: 16pt; }
+.step h2 small { font-weight: 400; color: var(--muted); font-size: 11pt; }
+
+/* Nút / phím trong phần mềm */
+.btn {
+  display: inline-block; padding: 0 5pt; border: 1px solid #b9bec7; border-radius: 4pt;
+  background: var(--soft); font-weight: 600; white-space: nowrap;
+}
+.btn.main { background: #ff4b4b; border-color: #ff4b4b; color: #fff; }
+kbd {
+  display: inline-block; padding: 0 5pt; border: 1px solid #b9bec7; border-bottom-width: 2px;
+  border-radius: 4pt; background: #fff; font: 600 10.5pt "Source Sans", sans-serif;
+}
+.mk {  /* số đỏ giống số trên ảnh */
+  display: inline-block; width: 14pt; height: 14pt; line-height: 14pt; border-radius: 50%;
+  background: var(--accent); color: #fff; font-weight: 700; font-size: 9.5pt; text-align: center;
+  vertical-align: 1pt;
+}
+
+/* Ảnh */
+figure { margin: 8pt 0 0; break-inside: avoid; }
+figure img { display: block; width: 100%; border: 1px solid var(--line); border-radius: 6pt; }
+figcaption { color: var(--muted); font-size: 9.5pt; margin-top: 3pt; }
+figure.fit img { width: 84%; margin: 0 auto; }
+figure.r5 img { width: 88%; }
+
+/* Hộp lưu ý */
+.note {
+  border: 1px solid var(--info-line); background: var(--info-bg);
+  border-radius: 6pt; padding: 7pt 10pt; margin: 8pt 0; break-inside: avoid;
+}
+.note.warn { border-color: var(--warn-line); background: var(--warn-bg); }
+.note b.t { display: block; margin-bottom: 1pt; }
+
+/* Cây thư mục */
+pre.tree {
+  font: 500 10.5pt/1.45 "DejaVu Sans Mono", monospace; background: var(--soft);
+  border: 1px solid var(--line); border-radius: 6pt; padding: 8pt 12pt; margin: 6pt 0; break-inside: avoid;
+}
+pre.tree i { color: var(--muted); font-style: normal; font-family: "Source Sans", sans-serif; font-size: 10.5pt; }
+
+/* Danh sách file kết quả */
+.files { border: 1px solid var(--line); border-radius: 6pt; overflow: hidden; margin: 6pt 0; break-inside: avoid; }
+.files .bar { background: var(--soft); padding: 4pt 10pt; font-weight: 600; border-bottom: 1px solid var(--line); }
+.files .row { padding: 3pt 10pt 3pt 28pt; position: relative; border-bottom: 1px solid #eceef1; }
+.files .row:last-child { border-bottom: 0; }
+.files .row::before {
+  content: ""; position: absolute; left: 10pt; top: 5pt; width: 11pt; height: 14pt;
+  background: #e5484d; border-radius: 2pt;
+}
+.files .row.dim { color: var(--muted); }
+.files .row.dim::before { background: #9aa1ad; }
+
+/* Bảng sự cố */
+table { width: 100%; border-collapse: collapse; margin-top: 4pt; }
+th, td { text-align: left; vertical-align: top; padding: 5pt 8pt; border: 1px solid var(--line); }
+th { background: var(--soft); }
+td:first-child { width: 34%; font-weight: 600; }
+tr { break-inside: avoid; }
+table { break-inside: avoid; }
+
+.st { font-weight: 700; }
+.st.ok { color: var(--ok); } .st.w { color: #b45309; } .st.e { color: #b91c1c; }
+.foot { margin-top: 14pt; color: var(--muted); font-size: 9.5pt; text-align: center; }
+.pb { break-before: page; }
+</style>
+</head>
+<body>
+
+<h1>HoSoPDF — Hướng dẫn sử dụng</h1>
+<p class="sub">Tự động phân loại và ghép hồ sơ căn hộ thành các file PDF chuẩn.</p>
+
+<p>Bạn chỉ cần chỉ cho phần mềm thư mục chứa hồ sơ scan. Phần mềm sẽ tự đọc từng trang, nhận ra đó là
+loại giấy tờ nào (hợp đồng, biên bản bàn giao, giấy ủy quyền…) rồi ghép lại thành tối đa
+<b>6 file PDF</b> cho mỗi căn hộ, đặt tên sẵn.</p>
+
+<h2 class="sec">Bạn cần chuẩn bị</h2>
+<ol>
+  <li><b>Máy tính Windows 10 hoặc 11</b> (64-bit) có kết nối Internet.</li>
+  <li><b>Mã khóa (API key)</b> — một dãy chữ và số dài, do quản lý cấp cho bạn.</li>
+  <li><b>Hồ sơ scan sắp xếp như hình dưới:</b> mỗi căn hộ một thư mục, bên trong là các file PDF scan.</li>
+</ol>
+<pre class="tree">📁 Cr8-3                     <i>← thư mục gốc (dán đường dẫn của nó vào phần mềm)</i>
+ ├─ 📁 CR8-3_B4.01          <i>← mỗi căn hộ một thư mục</i>
+ │    ├─ 📄 scan_01.pdf
+ │    └─ 📄 scan_02.pdf
+ ├─ 📁 CR8-3_B4.02
+ │    └─ 📄 …
+ └─ …</pre>
+<p>Tên thư mục căn hộ (ví dụ <b>CR8-3_B4.01</b>) sẽ trở thành phần đầu tên các file kết quả.</p>
+
+<div class="note warn">
+  <b class="t">Cần biết trước khi dùng</b>
+  Ảnh các trang hồ sơ được gửi lên dịch vụ AI qua Internet để đọc, nên chỉ dùng với hồ sơ được phép xử lý.
+  Mỗi lần chạy sẽ tiêu hao hạn mức của mã khóa — đừng chạy lại những thư mục không cần thiết.
+</div>
+
+<h2 class="sec">Các bước thực hiện</h2>
+
+<div class="step">
+  <div class="head"><div class="num">1</div><h2>Cài đặt phần mềm <small>(chỉ làm một lần)</small></h2></div>
+  <ol>
+    <li>Bấm đúp file <b>HoSoPDF_Setup.exe</b>.</li>
+    <li>Nếu Windows hiện màn hình xanh <b>“Windows protected your PC”</b>: bấm chữ <span class="btn">More info</span>,
+        rồi bấm nút <span class="btn">Run anyway</span>. Đây là bình thường với phần mềm nội bộ.</li>
+    <li>Nếu Windows hỏi <i>“Do you want to allow this app to make changes to your device?”</i> →
+        bấm <span class="btn">Yes</span>.</li>
+    <li>Bấm <span class="btn">Next</span> vài lần (giữ nguyên các lựa chọn có sẵn) → <span class="btn">Install</span> →
+        <span class="btn">Finish</span>.</li>
+  </ol>
+  <p>Xong! Biểu tượng <b>HoSoPDF</b> xuất hiện trên màn hình Desktop và trong Start Menu.</p>
+</div>
+
+<div class="step">
+  <div class="head"><div class="num">2</div><h2>Mở phần mềm</h2></div>
+  <p>Bấm đúp biểu tượng <b>HoSoPDF</b> trên Desktop. Đợi khoảng <b>10–30 giây</b> (lần đầu lâu hơn):
+  trình duyệt mặc định của máy (Chrome, Edge…) tự mở trang của phần mềm như hình dưới.</p>
+  <ul>
+    <li>Không có cửa sổ đen nào hiện ra — đó là bình thường, phần mềm chạy ngầm.</li>
+    <li>Nếu trình duyệt báo <i>“không thể kết nối”</i>, đợi vài giây rồi bấm phím <kbd>F5</kbd>.</li>
+  </ul>
+  <figure><img src="img/01_man_hinh_dau.png" alt="Màn hình đầu tiên của phần mềm">
+    <figcaption>Màn hình đầu tiên. Ô số <span class="mk">1</span> là nơi dán đường dẫn thư mục hồ sơ (Bước 4).</figcaption></figure>
+</div>
+
+<div class="step">
+  <div class="head"><div class="num">3</div><h2>Nhập mã khóa <small>(chỉ làm lần đầu)</small></h2></div>
+  <ol>
+    <li>Bấm nút <span class="btn">Cài đặt</span> ở thanh bên trái <span class="mk">1</span>.</li>
+    <li>Dán mã khóa vào ô <span class="mk">2</span>. Ô bên trái cứ để <b>Google (Gemini)</b>, trừ khi quản lý dặn chọn nhà cung cấp khác.</li>
+    <li>Bấm <span class="btn main">Lưu API keys</span> <span class="mk">3</span>, rồi bấm <span class="btn">← Quay lại vận hành</span>.</li>
+  </ol>
+  <p>Mã khóa được lưu trên máy, lần sau không phải nhập lại. Hãy giữ kín mã khóa như một mật khẩu.</p>
+  <figure><img src="img/02_cai_dat_key.png" alt="Màn hình Cài đặt, nhập mã khóa"></figure>
+</div>
+
+<div class="step">
+  <div class="head"><div class="num">4</div><h2>Chọn thư mục hồ sơ</h2></div>
+  <ol>
+    <li>Mở <b>File Explorer</b> (thư mục Windows), đi tới thư mục gốc chứa các thư mục căn hộ.</li>
+    <li>Bấm vào <b>thanh địa chỉ</b> phía trên (chỗ hiện đường dẫn), rồi nhấn <kbd>Ctrl</kbd>+<kbd>C</kbd>.</li>
+    <li>Quay lại phần mềm, bấm vào ô số <span class="mk">1</span>, nhấn <kbd>Ctrl</kbd>+<kbd>V</kbd>, rồi nhấn <kbd>Enter</kbd>.</li>
+  </ol>
+  <p>Danh sách các thư mục căn hộ hiện ra, trạng thái <b>chưa chạy</b>. Có dấu ngoặc kép quanh đường dẫn cũng
+  không sao. Phần mềm nhớ thư mục này cho những lần mở sau.</p>
+  <figure class="fit"><img src="img/03_duong_dan.png" alt="Đường dẫn thư mục và danh sách căn hộ"></figure>
+</div>
+
+<div class="step">
+  <div class="head"><div class="num">5</div><h2>Phân loại và tạo file PDF</h2></div>
+  <ol>
+    <li>Phần mềm tự chọn sẵn tất cả thư mục chưa chạy <span class="mk">1</span>. Muốn bỏ thư mục nào, bấm dấu <b>×</b> cạnh tên nó.</li>
+    <li>Bấm nút đỏ <span class="btn main">Phân loại &amp; Tạo 6 file PDF</span> <span class="mk">2</span>, rồi chờ.</li>
+  </ol>
+  <p>Thanh tiến trình cho biết phần mềm đang làm thư mục nào. Mỗi thư mục mất vài phút, hồ sơ dài có thể tới khoảng 20 phút.</p>
+  <div class="note warn">
+    <b class="t">Trong lúc chạy</b>
+    Giữ cửa sổ trình duyệt <b>mở</b> và đừng để máy tự ngủ. Muốn dừng, bấm <span class="btn">Dừng</span>;
+    lần sau bấm <span class="btn">Chạy tiếp</span>.
+  </div>
+  <p>Kết quả mỗi thư mục:
+    <span class="st ok">✅ xong, ổn</span> &nbsp;·&nbsp;
+    <span class="st w">⚠️ xong nhưng nên kiểm tra lại</span> (Bước 6) &nbsp;·&nbsp;
+    <span class="st e">❌ lỗi</span> (xem mục “Gặp sự cố”).</p>
+  <figure class="fit"><img src="img/04_nut_chay.png" alt="Nút Phân loại và Tạo 6 file PDF"></figure>
+</div>
+
+<div class="step">
+  <div class="head"><div class="num">6</div><h2>Kiểm tra trang nghi ngờ <small>(khi có ⚠️)</small></h2></div>
+  <p>Bấm tab <span class="btn">② Review &amp; Sửa nhãn</span> rồi chọn thư mục cần xem.</p>
+  <ol>
+    <li>Đánh dấu ô <b>“Chỉ hiện trang cần kiểm”</b> <span class="mk">1</span> để chỉ thấy những trang phần mềm không chắc (cột <b>Tin cậy</b> thấp).</li>
+    <li>Bảng <span class="mk">2</span> cho biết từng trang được xếp vào loại nào. Sai thì bấm vào ô <b>Loại</b> để đổi.
+        Muốn nhìn trang thật, chọn nó ở ô <b>Xem trang</b> bên phải.</li>
+    <li>Sửa xong, bấm <span class="btn main">Tạo 6 file PDF</span> <span class="mk">3</span> để ghép lại theo nhãn đã sửa.</li>
+  </ol>
+  <figure class="fit r5"><img src="img/05_review.png" alt="Màn hình Review và sửa nhãn"></figure>
+</div>
+
+<div class="step">
+  <div class="head"><div class="num">7</div><h2>Lấy kết quả</h2></div>
+  <p>Mở thư mục của căn hộ, bên trong có thư mục con <b>output</b>. Tên file = tên thư mục căn hộ + loại giấy tờ.
+  Loại nào hồ sơ không có thì sẽ không có file đó.</p>
+  <div class="files">
+    <div class="bar">CR8-3_B4.01 › output &nbsp;<span style="font-weight:400;color:#5b6472">(ví dụ)</span></div>
+    <div class="row">CR8-3_B4.01_Đơn đăng ký biến động.pdf</div>
+    <div class="row">CR8-3_B4.01_Hợp đồng.pdf</div>
+    <div class="row">CR8-3_B4.01_Biên bản bàn giao.pdf</div>
+    <div class="row">CR8-3_B4.01_Thuế.pdf</div>
+    <div class="row">CR8-3_B4.01_Giấy ủy quyền.pdf</div>
+    <div class="row">CR8-3_B4.01_Thông tin Khách hàng.pdf</div>
+    <div class="row dim">_index.csv &nbsp;— bảng nhãn từng trang, phần mềm tự dùng, cứ để nguyên</div>
+  </div>
+  <p>File gốc của bạn không bị sửa hay xóa.</p>
+</div>
+
+<h2 class="sec">Gặp sự cố?</h2>
+<table>
+  <tr><th>Hiện tượng</th><th>Cách xử lý</th></tr>
+  <tr><td>Trình duyệt báo “không thể kết nối”</td>
+      <td>Đợi 30 giây rồi bấm <kbd>F5</kbd>. Vẫn không được: bấm đúp lại biểu tượng HoSoPDF trên Desktop.</td></tr>
+  <tr><td>Nút “Phân loại &amp; Tạo 6 file PDF” bị mờ</td>
+      <td>Chưa nhập mã khóa — làm Bước 3.</td></tr>
+  <tr><td>“Thư mục không tồn tại hoặc không truy cập được”</td>
+      <td>Dán lại đường dẫn theo Bước 4. Nếu hồ sơ nằm trên ổ mạng hoặc Google Drive, hãy chắc là đã kết nối và đồng bộ xong.</td></tr>
+  <tr><td>Thư mục báo ❌ lỗi</td>
+      <td>Thường do mạng chập chờn hoặc dịch vụ AI đang quá tải. Đợi vài phút rồi bấm lại nút <span class="btn main">Phân loại &amp; Tạo 6 file PDF</span> — phần mềm chỉ làm các thư mục chưa xong.
+          Lỗi lặp lại nhiều lần: báo quản lý (có thể mã khóa đã hết hạn mức).</td></tr>
+  <tr><td>Muốn làm lại thư mục đã ✅</td>
+      <td>Ở Bước 5, đánh dấu ô <b>“Chạy lại folder đã xong”</b> rồi chạy.</td></tr>
+</table>
+
+<h2 class="sec">Tắt, gỡ phần mềm và nhờ hỗ trợ</h2>
+<ul>
+  <li><b>Tắt phần mềm:</b> Start Menu → <b>HoSoPDF</b> → <b>Dừng HoSoPDF</b> (tắt máy cũng được).</li>
+  <li><b>Gỡ cài đặt:</b> Start Menu → <b>HoSoPDF</b> → <b>Gỡ cài đặt HoSoPDF</b>. Các file kết quả nằm trong thư mục hồ sơ nên không bị mất.</li>
+  <li><b>Nhờ hỗ trợ:</b> nhấn <kbd>Windows</kbd>+<kbd>R</kbd>, gõ <b>%APPDATA%\HoSoPDF</b> rồi nhấn <kbd>Enter</kbd>.
+      Gửi cho người hỗ trợ file <b>app_log.txt</b> và file <b>hoso.log</b> (trong thư mục <b>logs</b>) kèm mô tả lỗi.</li>
+</ul>
+
+</body>
+</html>

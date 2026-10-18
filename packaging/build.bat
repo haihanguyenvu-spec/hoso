@@ -87,6 +87,7 @@ echo === Copy launcher ===
 copy /y "%HERE%launch.vbs" "%OUT%\launch.vbs" >nul || goto :err
 copy /y "%HERE%stop.vbs"   "%OUT%\stop.vbs"   >nul || goto :err
 copy /y "%HERE%app.ico"    "%OUT%\app.ico"    >nul || goto :err
+copy /y "%HERE%huongdan\HuongDan_HoSoPDF.pdf" "%OUT%\HuongDan.pdf" >nul || goto :err
 
 echo.
 echo === Bundle xong: %OUT% ===
