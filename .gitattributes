@@ -1,3 +1,2 @@
-# Script Windows phải là CRLF: cmd.exe đọc .bat chỉ có LF có thể nhảy sai nhãn (goto/call :label).
+# .bat phải là CRLF: cmd.exe đọc .bat chỉ có LF có thể nhảy sai nhãn (goto/call :label).
 *.bat text eol=crlf
-*.vbs text eol=crlf

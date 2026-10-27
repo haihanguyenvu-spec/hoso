@@ -393,23 +393,22 @@ class PdfAssembler:
         if len(single_pdfs) == 1:
             shutil.copyfile(single_pdfs[0], out_path)
         else:
-            if os.name == "nt" and any(ord(c) > 127 for c in out_path):
-                fd, temp_out = tempfile.mkstemp(suffix=".pdf", dir=get_safe_temp_dir())
-                os.close(fd)
-                try:
-                    subprocess.run(["pdfunite", *single_pdfs, temp_out], check=True,
-                                   capture_output=True, encoding="utf-8", errors="ignore",
-                                   timeout=PROC_TIMEOUT)
-                    shutil.copyfile(temp_out, out_path)
-                finally:
-                    try:
-                        os.remove(temp_out)
-                    except Exception:
-                        pass
-            else:
-                subprocess.run(["pdfunite", *single_pdfs, out_path], check=True,
+            # Luôn ghép ra file tạm (đường dẫn ASCII — poppler trên Windows không ghi được tên
+            # có dấu) rồi Python chép đè vào đích. Nhờ vậy file đích đang mở trong trình xem
+            # PDF báo PermissionError rõ ràng (UI dịch ra lời dễ hiểu), thay vì pdfunite chỉ
+            # trả một mã lỗi mơ hồ.
+            fd, temp_out = tempfile.mkstemp(suffix=".pdf", dir=get_safe_temp_dir())
+            os.close(fd)
+            try:
+                subprocess.run(["pdfunite", *single_pdfs, temp_out], check=True,
                                capture_output=True, encoding="utf-8", errors="ignore",
                                timeout=PROC_TIMEOUT)
+                shutil.copyfile(temp_out, out_path)
+            finally:
+                try:
+                    os.remove(temp_out)
+                except Exception:
+                    pass
         return len(single_pdfs)
 
     def cleanup(self):

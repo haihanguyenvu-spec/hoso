@@ -22,6 +22,9 @@ set TESSDATAURL=https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0
 REM 7zr.exe (console 7-Zip độc lập) lấy 7z.exe đầy đủ từ bộ cài 7-Zip, để giải nén được bộ cài NSIS.
 set SZRURL=https://www.7-zip.org/a/7zr.exe
 set SZURL=https://www.7-zip.org/a/7z2501-x64.exe
+REM Microsoft Visual C++ Runtime: poppler cần MSVCP140/VCRUNTIME140, máy sạch không có.
+REM Link chính thức luôn trỏ tới bản mới nhất (tương thích ngược mọi bản 2015-2022).
+set VCURL=https://aka.ms/vs/17/release/vc_redist.x64.exe
 
 REM ---- Thư mục ----
 set HERE=%~dp0
@@ -74,6 +77,9 @@ REM Chay thu that: phai liet ke duoc osd, neu khong app se am tham TAT sua xoay.
 set TESSDATA_PREFIX=%OUT%\tesseract\tessdata
 "%OUT%\tesseract\tesseract.exe" --list-langs 2>&1 | findstr /b /c:"osd" >nul || ( echo Tesseract khong chay duoc hoac thieu osd.traineddata & goto :err )
 
+echo === Tai Microsoft Visual C++ Runtime (installer tu cai kem) ===
+powershell -NoProfile -Command "Invoke-WebRequest -Uri '%VCURL%' -OutFile '%DL%\vc_redist.x64.exe'" || goto :err
+
 echo === Sao chep code app ===
 robocopy "%ROOT%\hoso_tool" "%OUT%\app\hoso_tool" /e /xd __pycache__ output /xf .gemini_key .gemini_key_2 key.py /njh /njs /ndl /nc /ns /np >nul
 if errorlevel 8 goto :err
@@ -84,8 +90,8 @@ echo === Xoa input_root mac dinh (path may khac) trong config ban dong goi ===
 powershell -NoProfile -Command "$p='%OUT%\app\hoso_tool\config.yaml'; (Get-Content -Raw $p) -replace 'input_root:\s*\".*?\"','input_root: \"\"' | Set-Content -NoNewline $p" || goto :err
 
 echo === Copy launcher ===
-copy /y "%HERE%launch.vbs" "%OUT%\launch.vbs" >nul || goto :err
-copy /y "%HERE%stop.vbs"   "%OUT%\stop.vbs"   >nul || goto :err
+copy /y "%HERE%launcher.py" "%OUT%\launcher.py" >nul || goto :err
+copy /y "%HERE%stop.py"     "%OUT%\stop.py"     >nul || goto :err
 copy /y "%HERE%app.ico"    "%OUT%\app.ico"    >nul || goto :err
 copy /y "%HERE%huongdan\HuongDan_HoSoPDF.pdf" "%OUT%\HuongDan.pdf" >nul || goto :err
 

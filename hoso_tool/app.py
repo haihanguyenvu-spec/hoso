@@ -18,6 +18,15 @@ import pandas as pd
 import streamlit as st
 import yaml
 
+try:
+    # Xác thực HTTPS bằng kho chứng chỉ của hệ điều hành (như trình duyệt) thay cho bộ certifi
+    # đi kèm: mạng công ty có thiết bị kiểm tra SSL làm mọi lệnh gọi API báo
+    # CERTIFICATE_VERIFY_FAILED, dù trình duyệt trên cùng máy vẫn vào mạng bình thường.
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
 sys.path.insert(0, os.path.dirname(__file__))
 import pipeline  # noqa: E402
 from classify import _provider_of_model, make_classifier  # noqa: E402
@@ -491,6 +500,43 @@ def upsert_summary(input_root: str, res, cfg: dict):
         w.writerows(rows)
 
 
+# ---------- Lỗi hay gặp trên máy người dùng ----------
+LOCKED_HINT = ("Không ghi được file — file đang mở ở chương trình khác (trình xem PDF, Excel…) "
+               "hoặc thư mục chỉ cho đọc. Đóng file đó rồi chạy lại.")
+
+
+def friendly_error(err) -> str:
+    """Thêm lời giải thích dễ hiểu cho lỗi hay gặp; giữ nguyên chi tiết kỹ thuật ở cuối."""
+    text = err if isinstance(err, str) else f"{type(err).__name__}: {err}"
+    if "PermissionError" in text or "WinError 32" in text:
+        return f"{LOCKED_HINT} ({text})"
+    return text
+
+
+@st.cache_resource(show_spinner=False)
+def poppler_problem() -> str:
+    """'' nếu bộ công cụ PDF (poppler) chạy được; ngược lại là lời giải thích cho người dùng.
+
+    Thiếu poppler hoặc thiếu Visual C++ Runtime thì MỌI bước đọc/cắt/ghép PDF đều hỏng —
+    báo ngay khi mở app thay vì để từng hồ sơ lỗi với một mã số khó hiểu.
+    """
+    try:
+        r = subprocess.run(["pdfinfo", "-v"], capture_output=True, timeout=60)
+    except FileNotFoundError:
+        if os.name == "nt":
+            return "Không tìm thấy bộ công cụ PDF (poppler) đi kèm phần mềm. Hãy cài lại HoSoPDF."
+        return ("Không tìm thấy poppler (pdfinfo). Cài bằng: brew install poppler · "
+                "apt install poppler-utils")
+    except Exception as e:
+        return f"Không chạy được bộ công cụ PDF (poppler): {type(e).__name__}: {e}"
+    if (r.returncode & 0xFFFFFFFF) == 0xC0000135:      # STATUS_DLL_NOT_FOUND
+        return ("Máy thiếu **Microsoft Visual C++ Runtime** nên không đọc/ghép được PDF. Chạy lại "
+                "file cài HoSoPDF_Setup.exe (bản mới tự cài kèm), hoặc tải và cài "
+                "https://aka.ms/vs/17/release/vc_redist.x64.exe — sau đó bấm **Dừng HoSoPDF** "
+                "trong Start Menu rồi mở lại phần mềm.")
+    return ""
+
+
 # ---------- Hàng đợi batch (sống sót qua rerun) ----------
 BATCH = "batch_state"
 
@@ -547,6 +593,11 @@ footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 LOG_PATH = setup_logging()
+_pdf_problem = poppler_problem()
+if _pdf_problem:
+    log.error("Bộ công cụ PDF không dùng được: %s", _pdf_problem)
+    st.error("❌ " + _pdf_problem)
+    st.stop()
 cfg = load_config()
 name_by_key, key_by_name = label_maps(cfg)
 
@@ -754,7 +805,7 @@ if batch_running:
             res = pipeline.process_folder(folder, cfg, classify, dry_run=False,
                                           progress=on_progress)
         except Exception as e:
-            err = f"{type(e).__name__}: {e}"
+            err = friendly_error(e)
             log.exception("Folder %s hỏng ngoài dự kiến", fname)
         dt = time.time() - t0
 
@@ -772,8 +823,9 @@ if batch_running:
             batch["failed_calls"] += res.failed_calls
             if res.status == "error":
                 batch["errors"] += 1
-                batch["log"].append(("error", fname, res.error, dt))
-                status.update(label=f"❌ {fname} — {res.error}", state="error", expanded=False)
+                batch["log"].append(("error", fname, friendly_error(res.error), dt))
+                status.update(label=f"❌ {fname} — {friendly_error(res.error)}", state="error",
+                              expanded=False)
             else:
                 os.makedirs(os.path.dirname(done_marker), exist_ok=True)
                 open(done_marker, "w").close()
@@ -919,11 +971,21 @@ with tab2:
         c1, c2 = st.columns(2)
         if c1.button("💾 Lưu nhãn", key=f"save::{folder}"):
             out_dir = os.path.join(folder, cfg["output_subdir"])
-            os.makedirs(out_dir, exist_ok=True)
-            pipeline.write_index(os.path.join(out_dir, pipeline.INDEX_NAME), entries)
-            st.toast("Đã lưu _index.csv")
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+                pipeline.write_index(os.path.join(out_dir, pipeline.INDEX_NAME), entries)
+                st.toast("Đã lưu _index.csv")
+            except OSError as e:          # _index.csv đang mở trong Excel -> bị khóa
+                log.exception("Lưu nhãn %s hỏng", fname)
+                st.error("❌ " + friendly_error(e))
+        res = None
         if c2.button("📦 Tạo 6 file PDF", type="primary", key=f"build::{folder}"):
-            res = pipeline.assemble_from_index(folder, cfg, entries)
+            try:
+                res = pipeline.assemble_from_index(folder, cfg, entries)
+            except Exception as e:        # file kết quả đang mở trong trình xem PDF, ...
+                log.exception("Ghép %s hỏng", fname)
+                st.error("❌ " + friendly_error(e))
+        if res is not None:
             open(os.path.join(folder, cfg["output_subdir"], ".done"), "w").close()
             # Cập nhật luôn báo cáo tổng: trước đây nút này chỉ ghi .done nên tab ③
             # vẫn hiện trạng thái 'error' của lần chạy hỏng trước.

@@ -4,6 +4,9 @@ streamlit==1.58.0
 # starlette 1.x, máy chủ Streamlit trả lỗi 500 khi phát ảnh (st.image) -> khung "Xem trang"
 # ở tab "Review & Sửa nhãn" bị vỡ. Ghim bản đã kiểm tra chạy đúng.
 starlette==0.52.1
+# Xác thực HTTPS bằng kho chứng chỉ của hệ điều hành: mạng công ty có thiết bị kiểm tra SSL
+# làm mọi lệnh gọi API báo CERTIFICATE_VERIFY_FAILED nếu chỉ dùng bộ certifi đi kèm.
+truststore==0.10.4
 PyYAML==6.0.3
 # pandas đi kèm streamlit, ghim cho chắc:
 pandas==3.0.3
